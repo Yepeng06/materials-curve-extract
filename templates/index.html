@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>材料曲线提取 V0</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main>
+    <h1>材料科学图像曲线识别与智能解析（V0-Midterm）</h1>
+    <form action="/extract" method="post" enctype="multipart/form-data">
+      <label>上传图片 <input type="file" name="image" required /></label>
+      <h3>plot_area</h3>
+      <input name="left" type="number" placeholder="left" required>
+      <input name="top" type="number" placeholder="top" required>
+      <input name="right" type="number" placeholder="right" required>
+      <input name="bottom" type="number" placeholder="bottom" required>
+      <h3>x_range</h3>
+      <input name="x_min" type="number" step="any" placeholder="x_min" required>
+      <input name="x_max" type="number" step="any" placeholder="x_max" required>
+      <h3>y_range</h3>
+      <input name="y_min" type="number" step="any" placeholder="y_min" required>
+      <input name="y_max" type="number" step="any" placeholder="y_max" required>
+      <h3>mode</h3>
+      <select name="mode">
+        <option value="gray">gray</option>
+        <option value="hsv">hsv</option>
+      </select>
+      <button type="submit">开始提取</button>
+    </form>
+  </main>
+</body>
+</html>
