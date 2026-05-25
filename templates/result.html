@@ -4,15 +4,27 @@
 <body>
 <main>
   <h1>提取结果</h1>
-  <p>原图路径: {{ result.outputs.input }}</p>
+  <p>输入图像: {{ result.input_path }}</p>
+  <p>点数: {{ result.point_count }}</p>
+  <p>plot_area: {{ result.plot_area }}</p>
+  <p>x_range: {{ result.x_range }}</p>
+  <p>y_range: {{ result.y_range }}</p>
+
+  <h2>预览</h2>
+  <div>
+    <p>extracted_overlay.png</p>
+    <img src="/{{ result.output_files.extracted_overlay }}" alt="overlay" style="max-width: 720px;" />
+  </div>
+  <div>
+    <p>redrawn_curve.png</p>
+    <img src="/{{ result.output_files.redrawn_curve }}" alt="redrawn" style="max-width: 720px;" />
+  </div>
+
+  <h2>下载</h2>
   <ul>
-    <li><a href="/{{ result.outputs.cropped_plot_area }}">cropped_plot_area.png</a></li>
-    <li><a href="/{{ result.outputs.curve_mask }}">curve_mask.png</a></li>
-    <li><a href="/{{ result.outputs.extracted_overlay }}">extracted_overlay.png</a></li>
-    <li><a href="/{{ result.outputs.redrawn_curve }}">redrawn_curve.png</a></li>
-    <li><a href="/{{ result.outputs.output_csv }}">output.csv</a></li>
-    <li><a href="/{{ result.outputs.output_json }}">output.json</a></li>
-    <li><a href="/{{ result.outputs.report_md }}">report.md</a></li>
+    <li><a href="/{{ result.output_files.output_csv }}">output.csv</a></li>
+    <li><a href="/{{ result.output_files.output_json }}">output.json</a></li>
+    <li><a href="/{{ result.output_files.report_md }}">report.md</a></li>
   </ul>
   <p><a href="/">返回首页</a></p>
 </main>
