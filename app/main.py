@@ -28,7 +28,7 @@ def _parse_hsv(mode: str, lower: tuple[int | None, int | None, int | None], uppe
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html", context={"request": request})
 
 
 @app.post("/extract", response_class=HTMLResponse)
@@ -79,7 +79,11 @@ async def extract_web(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return templates.TemplateResponse("result.html", {"request": request, "result": result})
+    return templates.TemplateResponse(
+        request=request,
+        name="result.html",
+        context={"request": request, "result": result},
+    )
 
 
 @app.post("/api/extract")
