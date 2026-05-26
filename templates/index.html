@@ -7,7 +7,8 @@
 </head>
 <body>
   <main>
-    <h1>材料科学图像曲线识别与智能解析（V0-Midterm）</h1>
+    <h1>材料科学图像曲线提取（V0 OpenCV Baseline）</h1>
+    <p>gray 适合黑色/深色曲线；hsv 适合彩色曲线（需手动设置 HSV 阈值）。</p>
     <form action="/extract" method="post" enctype="multipart/form-data">
       <label>上传图片 <input type="file" name="image" required /></label>
       <h3>plot_area</h3>
@@ -26,6 +27,16 @@
         <option value="gray">gray</option>
         <option value="hsv">hsv</option>
       </select>
+      <h3>hsv_lower (可选, hsv 模式必填)</h3>
+      <input name="hsv_lower_h" type="number" placeholder="h" min="0" max="179">
+      <input name="hsv_lower_s" type="number" placeholder="s" min="0" max="255">
+      <input name="hsv_lower_v" type="number" placeholder="v" min="0" max="255">
+      <h3>hsv_upper (可选, hsv 模式必填)</h3>
+      <input name="hsv_upper_h" type="number" placeholder="h" min="0" max="179">
+      <input name="hsv_upper_s" type="number" placeholder="s" min="0" max="255">
+      <input name="hsv_upper_v" type="number" placeholder="v" min="0" max="255">
+      <h3>resample_n (可选)</h3>
+      <input name="resample_n" type="number" min="2" value="512" />
       <button type="submit">开始提取</button>
     </form>
   </main>

@@ -3,35 +3,37 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 from app.config import ExtractionConfig
 from app.coordinate import pixel_to_data_points
 from app.export import export_csv, export_json
+from app.extract_curve import extract_curve_mask
+from app.preprocess import crop_plot_area, load_image, save_image
+from app.reconstruct import mask_to_curve_points
 from app.visualize import draw_overlay, draw_redrawn_curve
 
 
-def _generate_mock_pixel_points(config: ExtractionConfig, n: int = 50) -> list[tuple[float, float]]:
-    left, right = config.plot_area.left, config.plot_area.right
-    top, bottom = config.plot_area.top, config.plot_area.bottom
-    xs = np.linspace(left, right, n)
-    mid = (top + bottom) / 2.0
-    amp = max((bottom - top) * 0.25, 1.0)
-    ys = mid + amp * np.sin(np.linspace(0, np.pi, n))
-    ys = np.clip(ys, top, bottom)
-    return list(zip(xs.tolist(), ys.tolist()))
+EXTRACTOR_VERSION = "v0-opencv-baseline"
 
 
 def run_extraction(config: ExtractionConfig) -> dict:
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    image = cv2.imread(str(config.input_path))
-    if image is None:
-        raise ValueError(f"failed to read image: {config.input_path}")
+    image = load_image(config.input_path)
+    save_image(output_dir / "input.png", image)
 
-    pixel_points = _generate_mock_pixel_points(config, n=max(config.resample_n // 16, 10))
+    cropped = crop_plot_area(image, config.plot_area)
+    save_image(output_dir / "cropped_plot_area.png", cropped)
+
+    curve_mask = extract_curve_mask(
+        cropped_image=cropped,
+        mode=config.mode,
+        hsv_lower=config.hsv_lower,
+        hsv_upper=config.hsv_upper,
+    )
+    save_image(output_dir / "curve_mask.png", curve_mask)
+
+    pixel_points = mask_to_curve_points(curve_mask, config.plot_area, resample_n=config.resample_n)
     mapped_points = pixel_to_data_points(pixel_points, config.plot_area, config.x_range, config.y_range)
 
     csv_path = output_dir / "output.csv"
@@ -41,20 +43,21 @@ def run_extraction(config: ExtractionConfig) -> dict:
     draw_overlay(config.input_path, mapped_points, overlay_path)
 
     redrawn_path = output_dir / "redrawn_curve.png"
-    draw_redrawn_curve(csv_path=csv_path, output_path=redrawn_path)
+    draw_redrawn_curve(data_points=mapped_points, output_path=redrawn_path)
 
     report_path = output_dir / "report.md"
     report_path.write_text(
         "\n".join(
             [
-                "# V0 Report",
+                "# V0 OpenCV Baseline Report",
                 "",
-                "- 当前阶段为 V0 coordinate mapping implemented",
-                f"- 本次输出点数: {len(mapped_points)}",
+                "- 当前阶段：V0 OpenCV baseline（真实曲线像素提取）",
+                f"- 提取模式: {config.mode}",
+                f"- 提取点数: {len(mapped_points)}",
                 f"- plot_area: {config.plot_area.model_dump()}",
                 f"- x_range: {config.x_range.model_dump()}",
                 f"- y_range: {config.y_range.model_dump()}",
-                "- 当前曲线像素点仍是模拟点，真实图像提取将在下一任务实现",
+                "- 当前限制：适合清晰单曲线，不适合复杂多曲线、严重噪声、自动 OCR。",
             ]
         ),
         encoding="utf-8",
@@ -67,10 +70,17 @@ def run_extraction(config: ExtractionConfig) -> dict:
         "x_range": config.x_range.model_dump(),
         "y_range": config.y_range.model_dump(),
         "mode": config.mode,
+        "hsv_lower": list(config.hsv_lower) if config.hsv_lower is not None else None,
+        "hsv_upper": list(config.hsv_upper) if config.hsv_upper is not None else None,
+        "resample_n": config.resample_n,
         "point_count": len(mapped_points),
         "status": "ok",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "extractor_version": EXTRACTOR_VERSION,
         "output_files": {
+            "input_png": str(output_dir / "input.png"),
+            "cropped_plot_area": str(output_dir / "cropped_plot_area.png"),
+            "curve_mask": str(output_dir / "curve_mask.png"),
             "output_csv": str(csv_path),
             "output_json": str(output_dir / "output.json"),
             "report_md": str(report_path),
@@ -79,6 +89,5 @@ def run_extraction(config: ExtractionConfig) -> dict:
         },
     }
 
-    json_path = output_dir / "output.json"
-    export_json(result, json_path)
+    export_json(result, output_dir / "output.json")
     return result

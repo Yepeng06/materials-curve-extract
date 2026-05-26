@@ -11,7 +11,8 @@ from app.pipeline import run_extraction
 
 def test_pipeline_smoke(tmp_path: Path):
     img = np.full((500, 700, 3), 255, dtype=np.uint8)
-    cv2.line(img, (120, 420), (620, 80), (0, 0, 0), 2)
+    pts = np.array([[120, 420], [250, 320], [400, 210], [620, 80]], dtype=np.int32)
+    cv2.polylines(img, [pts], False, (0, 0, 0), 3)
     input_path = tmp_path / "input.png"
     cv2.imwrite(str(input_path), img)
 
@@ -31,13 +32,15 @@ def test_pipeline_smoke(tmp_path: Path):
     assert (out_dir / "output.json").exists()
     assert (out_dir / "extracted_overlay.png").exists()
     assert (out_dir / "redrawn_curve.png").exists()
+    assert (out_dir / "curve_mask.png").exists()
     assert (out_dir / "report.md").exists()
 
     df = pd.read_csv(out_dir / "output.csv")
-    assert len(df) >= 10
+    assert len(df) > 10
     assert list(df.columns) == ["index", "pixel_x", "pixel_y", "x", "y"]
-    assert df["x"].notna().all()
-    assert df["y"].notna().all()
+    assert ((df["pixel_x"] >= 100) & (df["pixel_x"] < 650)).all()
+    assert ((df["pixel_y"] >= 50) & (df["pixel_y"] < 450)).all()
 
     meta = json.loads((out_dir / "output.json").read_text(encoding="utf-8"))
     assert meta["point_count"] == len(df)
+    assert meta["extractor_version"] == "v0-opencv-baseline"
