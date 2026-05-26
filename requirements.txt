@@ -10,3 +10,4 @@ scipy
 scikit-image
 pydantic
 pytest
+httpx

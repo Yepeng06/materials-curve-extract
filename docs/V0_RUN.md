@@ -1,18 +1,14 @@
-# V0 运行说明（Win11）
+# V0 运行说明
 
-```powershell
-cd <repo_path>
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pytest -q
-uvicorn app.main:app --reload
-```
+1. 安装依赖：`pip install -r requirements.txt`
+2. 运行测试：`pytest -q`
+3. 启动服务：`uvicorn app.main:app --reload`
+4. 打开：`http://127.0.0.1:8000`
 
-浏览器打开：`http://127.0.0.1:8000`
-
-## 说明
-- 当前 V0 已完成 Web 骨架 + 坐标映射核心。
-- 当前曲线点为模拟点，仅用于验证参数链路和坐标映射。
-- 下一阶段将实现 OpenCV 真实曲线像素提取。
-- 若 Codex 环境无法联网安装依赖，请在本地 Win11 环境运行上述命令。
+Web/API 参数：
+- `plot_area`: left/top/right/bottom
+- `x_range`: x_min/x_max
+- `y_range`: y_min/y_max
+- `mode`: gray 或 hsv
+- `hsv_lower`/`hsv_upper`: hsv 模式必填
+- `resample_n`: 可选

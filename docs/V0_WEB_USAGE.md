@@ -1,13 +1,17 @@
-# Web 使用说明（普通用户）
+# V0 Web 使用说明
 
-1. 打开网页首页 `/`。
-2. 上传材料文献曲线图像。
-3. 填写 `plot_area`（left/top/right/bottom）。
-4. 填写 `x_range` 和 `y_range`。
-5. 选择 `mode`（gray/hsv）。
-6. 点击“开始提取”。
-7. 在结果页下载：
-   - `output.csv`
-   - `output.json`
-   - `report.md`
-   - 并查看 `cropped_plot_area.png` / `curve_mask.png` / `extracted_overlay.png` / `redrawn_curve.png`
+1. 上传图片。
+2. 输入 plot_area（原图坐标）。
+3. 输入 x/y 范围。
+4. 选择 mode：
+   - gray：黑色/深色曲线
+   - hsv：彩色曲线（需输入 hsv_lower / hsv_upper）
+5. 可选 resample_n。
+6. 点击提取，查看输出文件路径和结果图。
+
+输出文件：
+- output.csv / output.json
+- curve_mask.png
+- extracted_overlay.png
+- redrawn_curve.png
+- report.md
