@@ -1,0 +1,18 @@
+# runtime outputs
+data/
+*.png
+*.jpg
+*.jpeg
+!data/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# ide
+.idea/
+.vscode/

@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# mci baseline pipeline configuration
+# Every key has a default in mci/pipeline/extractor.py::DEFAULTS;
+# values here override them.
+# ---------------------------------------------------------------------------
+
+# ---- chart structure detection ----
+axis_frac_threshold: 0.45   # ink fraction needed to accept an axis row/column
+
+# ---- tick reading / OCR ----
+ocr_backend: auto           # auto | paddle | stub (stub reads *_labels.json sidecar)
+tick_assoc_tol_px: 25        # label<->mark pairing tolerance (px)
+x_kind_hint: auto           # auto | linear | log  (coordinate type judgement)
+y_kind_hint: auto
+
+# ---- curve segmentation ----
+segmenter: cv               # cv | unet  (unet = trained model, more robust)
+unet_checkpoint: models/checkpoints/unet_curve.pt
+
+# ---- curve extraction ----
+min_curve_area: 60          # min connected-component area inside the plot
+max_points: 2000            # max output points per curve
+
+# ---- misc ----
+debug: false

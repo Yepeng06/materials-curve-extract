@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mci"
+version = "0.1.0"
+description = "materials-curve-intel: single-curve chart data extraction (baseline)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scikit-image>=0.22",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+eval = ["pandas>=2.0", "tqdm>=4.60"]
+ocr = ["paddlepaddle-gpu>=3.3", "paddleocr>=3.0"]
+train = ["torch", "torchvision", "ultralytics"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

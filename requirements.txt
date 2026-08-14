@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# mci baseline — core runtime dependencies (Python 3.11, conda env "mci")
+# ---------------------------------------------------------------------------
+numpy==1.26.4
+opencv-python>=4.8
+scikit-image>=0.22
+scipy>=1.10
+matplotlib>=3.7
+pyyaml>=6.0
+
+# --- optional: batch evaluation ---
+pandas>=2.0
+tqdm>=4.60
+
+# --- development ---
+pytest>=7.0
+
+# ---------------------------------------------------------------------------
+# GPU / ML stack (installed via the conda env, see README "Environment setup"):
+#
+#   torch/torchvision  (CUDA build — U-Net training/inference on GPU)
+#     python -m pip install torch==2.13.0 torchvision==0.28.0 \
+#         --index-url https://download.pytorch.org/whl/cu126
+#   ultralytics  (YOLOv8, Phase 2)
+#     python -m pip install ultralytics==8.4.115
+#   PaddleOCR + CPU paddle  (tick OCR; CPU because Windows torch+paddle-GPU
+#     cuDNN DLLs conflict — WinError 127)
+#     python -m pip install paddlepaddle==3.3.1 paddleocr==3.7.0
+# ---------------------------------------------------------------------------
