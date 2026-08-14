@@ -14,8 +14,9 @@ x_kind_hint: auto           # auto | linear | log  (coordinate type judgement)
 y_kind_hint: auto
 
 # ---- curve segmentation ----
-segmenter: cv               # cv | unet  (unet = trained model, more robust)
+segmenter: unet             # cv | unet  (unet = trained model, more robust)
 unet_checkpoint: models/checkpoints/unet_curve.pt
+unet_size: 512              # inference resolution (must match training resolution)
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot

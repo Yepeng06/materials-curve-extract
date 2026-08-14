@@ -358,6 +358,43 @@ def _refine_chain(prob: np.ndarray, chain: List[Tuple[int, int]],
 # ---------------------------------------------------------------------------
 # Main extraction
 # ---------------------------------------------------------------------------
+def _filter_mask_fragments(mask01: np.ndarray, plot_w: int, plot_h: int) -> np.ndarray:
+    """Drop non-curve mask fragments that corrupt tracing/centroid fallbacks.
+
+    Two fragment classes are removed (kept: the genuine curve):
+      (a) thin strips hugging the plot border that span the full plot edge
+          (frame / grid remnants — the CV path's historical rule);
+      (b) thin components that are short in BOTH directions (title text,
+          legend glyphs, dust): a real curve portion is either long in x
+          (horizontal segments) or tall in y (steep segments) — or thick.
+    Small specks (area < 8 or < 2% of the largest component) are dropped
+    too.  U-Net masks are usually solid for dashed curves (the network
+    learns dash completion from solid GT masks), so dropping isolated thin
+    fragments does not break the dash case.
+    """
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask01, 8)
+    if n <= 1:
+        return mask01
+    areas = [stats[i][4] for i in range(1, n)]
+    max_area = max(areas)
+    out = np.zeros_like(mask01)
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if area < max(8, 0.02 * max_area):
+            continue  # noise specks
+        thin = (h <= 8 or w <= 8)
+        # (a) full-edge frame strips (historical CV rule)
+        if thin and w >= 0.85 * plot_w and (y <= 0.08 * plot_h or y + h >= plot_h - 0.08 * plot_h):
+            continue
+        if thin and h >= 0.85 * plot_h and (x <= 0.05 * plot_w or x + w >= plot_w - 0.05 * plot_w):
+            continue
+        # (b) thin fragments short in both directions
+        if thin and w < 0.5 * plot_w and h < 0.5 * plot_h:
+            continue
+        out[labels == i] = 1
+    return out
+
+
 def _select_curve_mask_cv(image_bgr: np.ndarray, structure: ChartStructure,
                           cfg: Dict) -> np.ndarray:
     """CV path: binarize + grid removal + dash bridging + component scoring."""
@@ -367,6 +404,7 @@ def _select_curve_mask_cv(image_bgr: np.ndarray, structure: ChartStructure,
     plot_w, plot_h = x1 - x0 + 1, y1 - y0 + 1
     crop = image_bgr[y0 : y1 + 1, x0 : x1 + 1]
     ink = cv_plot_mask(image_bgr, structure, cfg)
+    ink = _filter_mask_fragments(ink, plot_w, plot_h)
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
     min_area = int(cfg.get("min_curve_area", 60))
@@ -433,6 +471,12 @@ def extract_curves(
             if region.max() < 0.5:
                 raise CurveExtractionError("segmentation found no curve in plot region")
             mask01 = (region > 0.5).astype(np.uint8)
+            # drop title/frame/dust fragments (see _filter_mask_fragments):
+            # they corrupt skeleton tracing (trace start on a fragment) and
+            # the per-column centroid fallback (fragment pixels averaged in)
+            mask01 = _filter_mask_fragments(mask01, plot_w, plot_h)
+            if mask01.sum() < 16:
+                raise CurveExtractionError("segmentation found no curve in plot region")
             skel = skeletonize(mask01.astype(bool)).astype(np.uint8)
             chain = _trace_chain(skel)
             if chain is not None:

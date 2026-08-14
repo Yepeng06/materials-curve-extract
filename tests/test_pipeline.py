@@ -58,6 +58,36 @@ def test_generator_works(tmp_path):
         capture_output=True, text=True,
     )
     assert res.returncode == 0, res.stderr
+    _assert_gen_sidecars(tmp_path)
+
+
+def test_filter_mask_fragments_keeps_curve_only():
+    """Thin non-curve fragments (title text / frame / dust) must be dropped
+    from segmentation masks before tracing, or they corrupt the skeleton
+    trace start and the column-centroid fallback."""
+    from mci.pipeline.curve_extractor import _filter_mask_fragments
+
+    h, w = 200, 400
+    mask = np.zeros((h, w), np.uint8)
+    # genuine curve: a long diagonal stroke (thick enough, spans both dims)
+    cv2 = pytest.importorskip("cv2")
+    cv2.line(mask, (20, 180), (380, 30), 255, 6)
+    # title-like fragment: thin horizontal strip, short in both directions
+    cv2.rectangle(mask, (60, 5), (150, 8), 255, -1)
+    # frame-like strip hugging the top edge, spanning the full width
+    cv2.rectangle(mask, (0, 0), (399, 2), 255, -1)
+    # dust specks
+    mask[100, 100] = 255
+    mask[101, 101] = 255
+
+    out = _filter_mask_fragments(mask, w, h)
+    assert out[20:200, 20:380].sum() > 0  # curve kept
+    assert out[5:9, 60:151].sum() == 0  # title fragment dropped
+    assert out[0:3, :].sum() == 0  # full-width frame strip dropped
+    assert out[99:103, 99:103].sum() == 0  # dust dropped
+
+
+def _assert_gen_sidecars(tmp_path):
     pngs = [p for p in tmp_path.glob("*.png") if not p.name.endswith("_mask.png")]
     assert len(pngs) == 4
     for p in pngs:
@@ -71,7 +101,7 @@ def test_end_to_end_linear(tmp_path):
     """CV backend: no hard failures; median rel_rmse < 2%; each image keeps
     at least 30% x-coverage (dashed curves are bridged as far as the CV
     heuristics can — the U-Net backend is asserted strictly below)."""
-    results = _run_synthetic(seed=11, count=6, tmp_path=tmp_path)
+    results = _run_synthetic(seed=11, count=6, tmp_path=tmp_path, segmenter="cv")
     failed = [r[0] + ": " + str(r[2].get("error", "")) for r in results if r[1] is None]
     assert not failed, failed
     rel = [r[2]["rel_rmse"] for r in results]
@@ -90,7 +120,7 @@ def test_end_to_end_mixed_axes(tmp_path):
     the U-Net backend (test_end_to_end_unet_strict) is where the strict
     1% acceptance target is asserted.
     """
-    results = _run_synthetic(seed=21, count=12, tmp_path=tmp_path)
+    results = _run_synthetic(seed=21, count=12, tmp_path=tmp_path, segmenter="cv")
     failed = [r[0] + ": " + str(r[2].get("error", "")) for r in results if r[1] is None]
     assert len(failed) <= 1, failed
     ok = [r for r in results if r[1] is not None]

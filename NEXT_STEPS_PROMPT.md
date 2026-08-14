@@ -28,16 +28,17 @@ git 历史、400 张训练数据、模型 checkpoint；`.gitignore` 排除了 `d
 → 像素→数据映射 → CSV/JSON/叠加图导出
 ```
 
-**关键指标（40 张合成测试集，stub OCR，seed 20260806）：**
+**关键指标（40 张合成测试集，stub OCR，seed 20260806；2026-08-14 更新）：**
 
 | 后端 | 中位 rel-RMSE | 最大 | ≤1% 达标率 | 每图点数 |
 |------|--------------|------|-----------|---------|
 | CV（训练免） | 1.73% | 82%（灾难样本存在） | 40% | ~800 |
-| **U-Net（推荐）** | **0.77%** | 3.2% | 70% | 788（245–1612） |
+| **U-Net（推荐，512/2400 张混合训练）** | **0.40%** | 1.65% | **87.5%** | ~800 |
 
-- 单元+端到端测试 **59/59 通过**（`python -m pytest tests -q`）
-- U-Net 训练：`train/train_segmentation.py`（400 张合成图+掩码，40 epochs ≈ 16 分钟，
-  val IoU 0.78 / Dice 0.87，checkpoint 在 `models/checkpoints/unet_curve.pt`）
+- 单元+端到端测试 **60/60 通过**（`python -m pytest tests -q`）
+- U-Net 训练：`train/train_segmentation.py`（2400 张混合数据 + 512 分辨率 +
+  AMP + 增强增强，从 256 检查点 `--init` 续训；checkpoint 在
+  `models/checkpoints/unet_curve.pt`，旧模型备份 `unet_curve_400baseline.pt`）
 - U-Net GPU 推理 ~0.1s/图；真实 PaddleOCR 路径端到端已验证
 - 合成数据工厂 `scripts/gen_synthetic.py`：5 类曲线 × 线性/对数轴 × 论文/实验风格 ×
   5 种退化，GT 像素级精确（Agg `buffer_rgba` + 自检），输出 PNG/CSV/掩码/meta/labels
@@ -65,20 +66,27 @@ git 历史、400 张训练数据、模型 checkpoint；`.gitignore` 排除了 `d
 - **已生成**：`data/train_platform`（2000 张，8 模板×250，log 轴 1096 张，多曲线
   1-5 张混合，0 失败）+ `data/eval_platform`（100 张单曲线评估集，seed 20260816）
 
-**U-Net 重训 Stage 1（256，混合数据 2400 张，40 epochs，AMP）：**
-`models/checkpoints/unet_curve_256_v1.pt`，评估对比（stub OCR）：
+**U-Net 重训（Phase A.1+A.2 完成）**：256 两轮（40+40 epochs）+ 512 微调
+（--init 续 30 epochs，AMP），最终模型 `models/checkpoints/unet_curve_512_v1.pt`
+（**已提升为默认 `unet_curve.pt`**，`configs/baseline.yaml` 改 `segmenter: unet`、
+`unet_size: 512`；旧模型备份为 `unet_curve_400baseline.pt`）。评估对比（stub OCR）：
 
-| 评估集 | 旧模型（400 张合成训练） | 新模型 v1（2400 张混合训练） |
-|--------|------------------------|------------------------------|
-| 合成 40 张 | med 0.77% / max 3.18% / 70% | med 0.66% / max 2.82% / 65% |
-| 平台 100 张 | med 0.76% / max **5.65%** / 61% | med **0.61%** / max **1.90%** / **88%** |
+| 评估集 | 旧模型（400 张合成） | 最终模型（2400 张混合 @512） |
+|--------|---------------------|------------------------------|
+| 合成 40 张 | med 0.77% / max 3.18% / 70% | **med 0.40% / max 1.65% / 87.5%** |
+| 平台 100 张 | med 0.76% / max 5.65% / 61% | **med 0.20% / max 0.67% / 100%** |
 
-→ 混合数据显著消除灾难样本（平台集 max 5.65%→1.90%，达标率 61%→88%）；
-合成集达标率略降 5pt（2 张恰好越过 1% 线，整体中位改善）。**续训中**：
-`unet_curve_256_v2.pt`（--init 续 40 epochs）；之后按需 512 实验
-（`--size 512`，全卷积架构可直接 `--init` 256 检查点；batch 4 + AMP，
-~0.43s/batch）。评估 512 模型时需 `scripts/evaluate.py --unet-size 512` 或
-config 覆盖 `unet_size`。
+**本次会话修复的 bug（重要，勿回退）：**
+1. **`DEFAULT_CONFIG_PATH` 目录层级错误**（`src/mci/pipeline/extractor.py` 少一层
+   dirname，解析到 `src/configs/baseline.yaml` 不存在 → 默认配置从未生效，
+   一直用 DEFAULTS(cv/256)）。已改为 4 层 dirname。此前的"默认配置评估"
+   实际都在用 DEFAULTS。
+2. **`_filter_mask_fragments`**（`curve_extractor.py`）：U-Net 掩码骨架化前剔除
+   标题文字/边框/尘点碎片（薄 + 两方向都短 或 贴边整长条）。512 模型会把
+   裁进 plot bbox 的标题笔画预测为曲线碎片 → 追踪起点落在碎片上失败 →
+   列质心回退被污染（img_0033 19.1%→0.33%、img_0031 6.3%→0.64%）。
+3. 测试 `test_end_to_end_linear`/`mixed_axes` 显式指定 `segmenter="cv"`
+   （默认已是 unet）。全套测试 **60/60 通过**。
 
 **训练/评估脚本新增能力**（均已入库）：`--size`、`--init`、`--limit`、
 `--amp`（CUDA 自动开）、`--data-dir` 逗号分隔多目录、`evaluate.py --unet-size`、

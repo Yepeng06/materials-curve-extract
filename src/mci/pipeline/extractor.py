@@ -24,7 +24,8 @@ from .legend_matcher import match_legends
 from .tick_reader import PaddleOCRBackend, StubOCRBackend, read_ticks
 
 DEFAULT_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))),
     "configs", "baseline.yaml",
 )
 
