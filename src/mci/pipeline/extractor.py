@@ -71,8 +71,11 @@ def _build_ocr(backend: str, image_path: str) -> object:
 
 class Extractor:
     def __init__(self, config_path: Optional[str] = None, ocr_backend: Optional[str] = None,
-                 segmenter: Optional[str] = None, debug_dir: Optional[str] = None):
+                 segmenter: Optional[str] = None, debug_dir: Optional[str] = None,
+                 config_override: Optional[Dict] = None):
         self.cfg = load_config(config_path)
+        if config_override:
+            self.cfg.update(config_override)
         if ocr_backend:
             self.cfg["ocr_backend"] = ocr_backend
         if segmenter:

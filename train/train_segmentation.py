@@ -38,14 +38,19 @@ SIZE = 256
 
 
 def _list_pairs(data_dir: str):
-    imgs = sorted(glob.glob(os.path.join(data_dir, "*.png")))
+    """Collect (image, mask) pairs; ``data_dir`` may be a comma-separated
+    list of directories (e.g. gen_synthetic + platform-adapter data)."""
     pairs = []
-    for p in imgs:
-        if p.endswith("_mask.png"):
+    for d in data_dir.split(","):
+        d = d.strip()
+        if not d or not os.path.isdir(d):
             continue
-        mask = p[:-4] + "_mask.png"
-        if os.path.exists(mask):
-            pairs.append((p, mask))
+        for p in sorted(glob.glob(os.path.join(d, "*.png"))):
+            if p.endswith("_mask.png"):
+                continue
+            mask = p[:-4] + "_mask.png"
+            if os.path.exists(mask):
+                pairs.append((p, mask))
     return pairs
 
 
@@ -141,6 +146,10 @@ def main() -> int:
     ap.add_argument("--out", default="models/checkpoints/unet_curve.pt")
     ap.add_argument("--size", type=int, default=SIZE,
                     help="training resolution (must match inference unet_size)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="cap training pairs (smoke tests / timing)")
+    ap.add_argument("--amp", action="store_true", default=None,
+                    help="enable mixed precision (auto-on for CUDA)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -150,10 +159,13 @@ def main() -> int:
     torch.manual_seed(args.seed)
 
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
-    print(f"device: {device}")
+    use_amp = args.amp if args.amp is not None else device.startswith("cuda")
+    print(f"device: {device}, amp: {use_amp}")
 
     pairs = _list_pairs(args.data_dir)
     val_pairs = _list_pairs(args.val_dir) if os.path.isdir(args.val_dir) else []
+    if args.limit > 0:
+        pairs = pairs[: args.limit]
     print(f"train pairs: {len(pairs)}, val pairs: {len(val_pairs)}")
     if len(pairs) < 10:
         print("ERROR: too few training images (did you run gen_synthetic with masks?)")
@@ -168,6 +180,7 @@ def main() -> int:
     model = UNet(in_channels=1, base=64).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     best_iou = 0.0
@@ -178,9 +191,15 @@ def main() -> int:
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             opt.zero_grad()
-            loss = bce_dice_loss(model(x), y)
-            loss.backward()
-            opt.step()
+            with torch.autocast(device_type="cuda", enabled=use_amp):
+                loss = bce_dice_loss(model(x), y)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                opt.step()
             tot_loss += loss.item() * len(x)
             n += len(x)
         sched.step()
