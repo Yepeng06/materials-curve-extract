@@ -3,6 +3,7 @@
 Usage (from the repo root, mci env):
   conda activate mci
   python scripts/gen_synthetic.py --out-dir data/train_synthetic --count 400 --seed 100
+  python data/dataset_builder.py --out-dir data/train_platform --count 2000 --seed 20260815
   python train/train_segmentation.py --data-dir data/train_synthetic \
       --val-dir data/synthetic --epochs 40 --batch 16 \
       --out models/checkpoints/unet_curve.pt
@@ -10,6 +11,10 @@ Usage (from the repo root, mci env):
 The generator emits one 0/1 mask PNG per chart (<stem>_mask.png) whose only
 foreground is the curve (drawn solid even for dashed curves), so the network
 learns to ignore axes/grid/text and to complete dash gaps.
+
+Resolution: pass --size to train at a different resolution (e.g. 512).  The
+inference side must use the same resolution — set ``unet_size`` in
+configs/baseline.yaml (default 256) to match, otherwise accuracy degrades.
 """
 from __future__ import annotations
 
@@ -45,9 +50,10 @@ def _list_pairs(data_dir: str):
 
 
 class ChartDataset(Dataset):
-    def __init__(self, pairs, augment: bool = False):
+    def __init__(self, pairs, augment: bool = False, size: int = SIZE):
         self.pairs = pairs
         self.augment = augment
+        self.size = size
 
     def __len__(self):
         return len(self.pairs)
@@ -58,32 +64,71 @@ class ChartDataset(Dataset):
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if img is None or mask is None:
             raise FileNotFoundError(img_path)
-        img = cv2.resize(img, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-        mask = cv2.resize(mask, (SIZE, SIZE), interpolation=cv2.INTER_NEAREST)
+        img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_AREA)
+        mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
 
         if self.augment:
-            if random.random() < 0.5:
-                img = cv2.flip(img, 1)
-                mask = cv2.flip(mask, 1)
-            if random.random() < 0.4:  # brightness/contrast
-                g = random.uniform(0.8, 1.25)
-                b = random.uniform(-25, 25)
-                img = np.clip(img.astype(np.float32) * g + b, 0, 255).astype(np.uint8)
-            if random.random() < 0.3:  # mild rotation
-                ang = random.uniform(-3, 3)
-                m = cv2.getRotationMatrix2D((SIZE / 2, SIZE / 2), ang, 1.0)
-                img = cv2.warpAffine(img, m, (SIZE, SIZE), flags=cv2.INTER_LINEAR,
-                                     borderValue=255)
-                mask = cv2.warpAffine(mask, m, (SIZE, SIZE), flags=cv2.INTER_NEAREST,
-                                      borderValue=0)
-            if random.random() < 0.25:  # JPEG noise
-                ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY,
-                                                     random.randint(60, 90)])
-                img = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
+            img, mask = _augment(img, mask)
 
         x = torch.from_numpy(img).float().unsqueeze(0) / 255.0
         y = (torch.from_numpy(mask).float().unsqueeze(0) / 255.0 > 0.5).float()
         return x, y
+
+
+def _augment(img: np.ndarray, mask: np.ndarray) -> tuple:
+    """On-line augmentation (mirrors the generator's degradation palette)."""
+    size = img.shape[0]
+    if random.random() < 0.5:
+        img = cv2.flip(img, 1)
+        mask = cv2.flip(mask, 1)
+    if random.random() < 0.4:  # brightness/contrast
+        g = random.uniform(0.8, 1.25)
+        b = random.uniform(-25, 25)
+        img = np.clip(img.astype(np.float32) * g + b, 0, 255).astype(np.uint8)
+    if random.random() < 0.3:  # mild rotation
+        ang = random.uniform(-3, 3)
+        m = cv2.getRotationMatrix2D((size / 2, size / 2), ang, 1.0)
+        img = cv2.warpAffine(img, m, (size, size), flags=cv2.INTER_LINEAR,
+                             borderValue=255)
+        mask = cv2.warpAffine(mask, m, (size, size), flags=cv2.INTER_NEAREST,
+                              borderValue=0)
+    if random.random() < 0.25:  # JPEG noise
+        ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY,
+                                             random.randint(60, 90)])
+        img = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
+    if random.random() < 0.3:  # random crop (chart region jitter)
+        f = random.uniform(0.82, 1.0)
+        cs = int(size * f)
+        x0 = random.randint(0, size - cs)
+        y0 = random.randint(0, size - cs)
+        img = cv2.resize(img[y0:y0 + cs, x0:x0 + cs], (size, size),
+                         interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask[y0:y0 + cs, x0:x0 + cs], (size, size),
+                          interpolation=cv2.INTER_NEAREST)
+    if random.random() < 0.2:  # mild perspective warp (scan skew)
+        dx = random.uniform(2, 8)
+        src = np.float32([[0, 0], [size, 0], [0, size], [size, size]])
+        dst = np.float32([[dx, 0], [size - dx, dx],
+                          [0, size - dx], [size, size]])
+        m = cv2.getPerspectiveTransform(src, dst)
+        img = cv2.warpPerspective(img, m, (size, size), flags=cv2.INTER_LINEAR,
+                                  borderValue=255)
+        mask = cv2.warpPerspective(mask, m, (size, size), flags=cv2.INTER_NEAREST,
+                                   borderValue=0)
+    if random.random() < 0.15:  # scan speckle / hairline noise
+        m = random.random()
+        img = img.copy()
+        if m < 0.5:
+            for _ in range(random.randint(1, 3)):  # thin dark/lit hairlines
+                y0 = random.randint(0, size - 1)
+                x0 = random.randint(0, size - 20)
+                v = 0 if random.random() < 0.5 else 255
+                cv2.line(img, (x0, y0), (x0 + random.randint(10, 60), y0), v, 1)
+        else:
+            noise = (np.random.default_rng().random(img.shape) < 0.0008)
+            img[noise] = 0
+            img[np.random.default_rng().random(img.shape) < 0.0008] = 255
+    return img, mask
 
 
 def main() -> int:
@@ -94,6 +139,8 @@ def main() -> int:
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--out", default="models/checkpoints/unet_curve.pt")
+    ap.add_argument("--size", type=int, default=SIZE,
+                    help="training resolution (must match inference unet_size)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -112,8 +159,8 @@ def main() -> int:
         print("ERROR: too few training images (did you run gen_synthetic with masks?)")
         return 1
 
-    train_ds = ChartDataset(pairs, augment=True)
-    val_ds = ChartDataset(val_pairs, augment=False)
+    train_ds = ChartDataset(pairs, augment=True, size=args.size)
+    val_ds = ChartDataset(val_pairs, augment=False, size=args.size)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=0, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)

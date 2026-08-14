@@ -148,6 +148,32 @@ materials-curve-dataset-platform，见 Roadmap）：
 - **GT 像素级精确**：直接从 Agg 渲染缓冲区取像素（`buffer_rgba`），
   与 `transData` 显示坐标一一对应，并内置自检（GT 曲线点必须落在墨迹附近）。
 
+### 6.1 dataset-platform 适配器（Phase A.1）
+
+`data/dataset_builder.py` 接入 materials-curve-dataset-platform（V0fix-final-2）
+的生成器 API（参数采样 `sample_parameters` + 蠕变曲线模型
+`generate_curve_data` + MCG-JSON 模式 + YOLO 标签收集），自行渲染并输出
+baseline 同款侧车 + 平台生态格式：
+
+```bash
+# 训练数据（8 模板 × 概率采样，多曲线 1-5，含对数轴与退化）
+python data/dataset_builder.py --out-dir data/train_platform --count 2000 \
+    --seed 20260815 --yolo
+# 单曲线可评估集（直接喂 scripts/evaluate.py）
+python data/dataset_builder.py --out-dir data/eval_platform --count 100 \
+    --num-curves 1 --seed 20260816
+```
+
+- 输出：PNG / 曲线掩码 / GT CSV（单曲线 `<stem>.csv`，多曲线
+  `<stem>_cN.csv` + `<stem>_curves.json` 清单）/ `_meta.json` /
+  `_labels.json` / `_mcg.json`（平台 MCG-JSON）/ `_yolo.txt`（可选）；
+- 平台渲染器不实现模板 image_settings/key_effects、不支持对数轴、无退化、
+  无刻度值 GT，且用 savefig 落盘 —— 适配器因此自渲染（buffer_rgba，
+  像素级精确），平台仓库零改动；
+- 修正/扩展：GBK 模板容错（平台自带 3 个 GBK 模板）、对数轴十年对齐
+  （≥3 个数量级保证刻度充足）、图例 inside_lower_left 映射、YOLO bbox
+  y 轴翻转、退化流水线。
+
 ## 7. 评估结果（40 张合成测试集，seed 20260806，stub OCR，mci 环境）
 
 | 后端 | 中位 rel-RMSE | p90 | 最大 | ≤1% 达标率 | 失败数 | 每图点数（中位） |

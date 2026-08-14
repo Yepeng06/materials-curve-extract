@@ -4,6 +4,7 @@ data/
 *.jpg
 *.jpeg
 !data/.gitkeep
+!data/*.py
 
 # python
 __pycache__/
