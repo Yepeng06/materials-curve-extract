@@ -146,6 +146,9 @@ def main() -> int:
     ap.add_argument("--out", default="models/checkpoints/unet_curve.pt")
     ap.add_argument("--size", type=int, default=SIZE,
                     help="training resolution (must match inference unet_size)")
+    ap.add_argument("--init", default=None,
+                    help="pretrained checkpoint to initialize from (UNet is "
+                         "fully convolutional: any input resolution works)")
     ap.add_argument("--limit", type=int, default=0,
                     help="cap training pairs (smoke tests / timing)")
     ap.add_argument("--amp", action="store_true", default=None,
@@ -178,6 +181,10 @@ def main() -> int:
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
 
     model = UNet(in_channels=1, base=64).to(device)
+    if args.init:
+        ckpt = torch.load(args.init, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["state_dict"])
+        print(f"initialized from {args.init} (val_iou={ckpt.get('val_iou')})")
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
