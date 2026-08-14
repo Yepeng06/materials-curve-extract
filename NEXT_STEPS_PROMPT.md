@@ -11,7 +11,7 @@
    多曲线召回 ≥95%）、技术路线（YOLOv8-nano + PaddleOCR + U-Net + 坐标映射引擎）。
 2. **`F:\CODE\New\baseline\README.md`** — baseline 的完整架构/用法/评估/限制说明。
 
-## 一、当前状态（已完成的 Baseline）
+## 一、当前状态（已完成的 Baseline + Phase A.1 进行中）
 
 **位置：** `F:\CODE\New\baseline`（已归档到 `F:\CODE\New\baseline_backup_20260814`，含
 git 历史、400 张训练数据、模型 checkpoint；`.gitignore` 排除了 `data/`，未入库）
@@ -35,7 +35,7 @@ git 历史、400 张训练数据、模型 checkpoint；`.gitignore` 排除了 `d
 | CV（训练免） | 1.73% | 82%（灾难样本存在） | 40% | ~800 |
 | **U-Net（推荐）** | **0.77%** | 3.2% | 70% | 788（245–1612） |
 
-- 单元+端到端测试 **57/57 通过**（`python -m pytest tests -q`）
+- 单元+端到端测试 **59/59 通过**（`python -m pytest tests -q`）
 - U-Net 训练：`train/train_segmentation.py`（400 张合成图+掩码，40 epochs ≈ 16 分钟，
   val IoU 0.78 / Dice 0.87，checkpoint 在 `models/checkpoints/unet_curve.pt`）
 - U-Net GPU 推理 ~0.1s/图；真实 PaddleOCR 路径端到端已验证
@@ -44,6 +44,48 @@ git 历史、400 张训练数据、模型 checkpoint；`.gitignore` 排除了 `d
 
 **多曲线/多子图扩展预留：** `Curve` 已是列表、`legend_matcher.py` 协议就位、
 `ChartStructure` 数据类是 YOLO 检测器的替换点、U-Net 可扩为多通道。
+
+### Phase A.1 进展（2026-08-14 会话）
+
+**`data/dataset_builder.py` 已完成并入库**（.gitignore 已改为 `data/*` + `!data/*.py`，
+注意 git 的父目录排除规则陷阱）：
+
+- 接入 `F:\CLAUDE\NewProject1\materials-curve-dataset-platform`（V0fix-final-2）生成器
+  API（`sample_parameters` / `generate_curve_data` / MCG-JSON / quality_check /
+  collect_yolo_labels），**平台仓库零改动**；自行用 `buffer_rgba` 渲染保证 GT 像素精确
+  （平台渲染器不实现模板 settings、无对数轴、无退化、无刻度值 GT、savefig 落盘）
+- 扩展：对数轴（十年对齐 ≥3 数量级）、退化流水线（含 low_quality 截图风）、模板
+  image_settings/axis_settings 生效、GBK 模板容错（平台自带 3 个 GBK 模板，其
+  generate_training_data.py 的 utf-8 加载会崩）、inside_lower_left 图例修正、
+  YOLO bbox y 轴翻转修正
+- 输出：PNG / 掩码 / CSV（单曲线）或 `_cN.csv`+`_curves.json`（多曲线）/ meta /
+  labels（stub OCR）/ `_mcg.json`（平台格式）/ `_yolo.txt`（--yolo）
+- 用法：`python data/dataset_builder.py --out-dir data/train_platform --count 2000
+  --seed 20260815 --yolo`；`--num-curves 1` 生成可评估单曲线集
+- **已生成**：`data/train_platform`（2000 张，8 模板×250，log 轴 1096 张，多曲线
+  1-5 张混合，0 失败）+ `data/eval_platform`（100 张单曲线评估集，seed 20260816）
+
+**U-Net 重训 Stage 1（256，混合数据 2400 张，40 epochs，AMP）：**
+`models/checkpoints/unet_curve_256_v1.pt`，评估对比（stub OCR）：
+
+| 评估集 | 旧模型（400 张合成训练） | 新模型 v1（2400 张混合训练） |
+|--------|------------------------|------------------------------|
+| 合成 40 张 | med 0.77% / max 3.18% / 70% | med 0.66% / max 2.82% / 65% |
+| 平台 100 张 | med 0.76% / max **5.65%** / 61% | med **0.61%** / max **1.90%** / **88%** |
+
+→ 混合数据显著消除灾难样本（平台集 max 5.65%→1.90%，达标率 61%→88%）；
+合成集达标率略降 5pt（2 张恰好越过 1% 线，整体中位改善）。**续训中**：
+`unet_curve_256_v2.pt`（--init 续 40 epochs）；之后按需 512 实验
+（`--size 512`，全卷积架构可直接 `--init` 256 检查点；batch 4 + AMP，
+~0.43s/batch）。评估 512 模型时需 `scripts/evaluate.py --unet-size 512` 或
+config 覆盖 `unet_size`。
+
+**训练/评估脚本新增能力**（均已入库）：`--size`、`--init`、`--limit`、
+`--amp`（CUDA 自动开）、`--data-dir` 逗号分隔多目录、`evaluate.py --unet-size`、
+`Extractor(config_override=...)`。
+
+**Phase A.3 真实图收集**：`data/real_papers/README.md` 已写好收集+gold 标注指南
+（用户任务，先 10-15 张即可开始）。
 
 ## 二、下一步工作（按优先级，每步先调研后动手、先请示用户再执行）
 
