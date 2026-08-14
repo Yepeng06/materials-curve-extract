@@ -1,5 +1,6 @@
 # runtime outputs
 data/*
+web/runs/
 *.png
 *.jpg
 *.jpeg

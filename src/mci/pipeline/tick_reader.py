@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -41,6 +42,7 @@ class PaddleOCRBackend:
     """
 
     strip_crops = True
+    _init_lock = threading.Lock()
 
     def __init__(self, lang: str = "en", device: str = "auto"):
         self.lang = lang
@@ -49,36 +51,39 @@ class PaddleOCRBackend:
 
     def _ensure(self):
         if self._ocr is None:
-            try:
-                # Load torch BEFORE paddle: paddleocr -> paddlex -> modelscope
-                # imports torch deep inside its chain, and on Windows loading
-                # torch's DLLs after paddle's DLLs are already in the process
-                # fails with WinError 127 on shm.dll.
-                import torch  # noqa: F401
-                import paddle
+            with PaddleOCRBackend._init_lock:  # 防多线程并发双初始化（Web 场景）
+                if self._ocr is not None:
+                    return
+                try:
+                    # Load torch BEFORE paddle: paddleocr -> paddlex -> modelscope
+                    # imports torch deep inside its chain, and on Windows loading
+                    # torch's DLLs after paddle's DLLs are already in the process
+                    # fails with WinError 127 on shm.dll.
+                    import torch  # noqa: F401
+                    import paddle
 
-                from paddleocr import PaddleOCR
+                    from paddleocr import PaddleOCR
 
-                kwargs = dict(
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False,
-                    lang=self.lang,
-                    enable_mkldnn=False,  # avoids oneDNN PIR conversion crashes
-                    text_detection_model_name="PP-OCRv4_mobile_det",
-                    text_recognition_model_name="PP-OCRv4_mobile_rec",
-                )
-                use_gpu = (
-                    self.device == "gpu"
-                    or (self.device == "auto" and paddle.device.is_compiled_with_cuda())
-                )
-                self._ocr = PaddleOCR(device="gpu" if use_gpu else "cpu", **kwargs)
-                self._device_used = "gpu" if use_gpu else "cpu"
-            except ImportError as e:  # pragma: no cover
-                raise TickReadingError(
-                    "PaddleOCR is not installed; use --ocr stub or install "
-                    "paddlepaddle + paddleocr"
-                ) from e
+                    kwargs = dict(
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False,
+                        lang=self.lang,
+                        enable_mkldnn=False,  # avoids oneDNN PIR conversion crashes
+                        text_detection_model_name="PP-OCRv4_mobile_det",
+                        text_recognition_model_name="PP-OCRv4_mobile_rec",
+                    )
+                    use_gpu = (
+                        self.device == "gpu"
+                        or (self.device == "auto" and paddle.device.is_compiled_with_cuda())
+                    )
+                    self._ocr = PaddleOCR(device="gpu" if use_gpu else "cpu", **kwargs)
+                    self._device_used = "gpu" if use_gpu else "cpu"
+                except ImportError as e:  # pragma: no cover
+                    raise TickReadingError(
+                        "PaddleOCR is not installed; use --ocr stub or install "
+                        "paddlepaddle + paddleocr"
+                    ) from e
 
     def read_text_boxes(self, image_bgr: np.ndarray) -> List[TextBox]:
         self._ensure()

@@ -1,5 +1,8 @@
 # mci — materials-curve-intel 曲线提取 baseline
 
+> 含展示版 Web 演示系统（`web/`），启动：`python web/app.py`（自动开浏览器，
+> 详见 `web/README.md`）。
+
 材料科学图像曲线智能识别与解析项目的 **Baseline 框架**（单曲线、单子图），
 端到端实现「图像 → 结构化曲线数据」，并为多曲线/多子图扩展预留了接口。
 

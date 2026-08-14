@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>材料曲线智能提取 — Web 演示</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>材料科学图像曲线智能识别与解析</h1>
+  <p class="sub">上传曲线图 → 一键提取 → 叠加图展示 → 结构化数据下载</p>
+</header>
+
+<main>
+  <!-- 上传区 -->
+  <section class="card" id="upload-card">
+    <h2>① 上传曲线图</h2>
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="file-input" accept=".png,.jpg,.jpeg" hidden>
+      <div class="dz-inner" id="dz-inner">
+        <div class="dz-icon">📈</div>
+        <p>点击选择 或 拖拽图片到此处</p>
+        <p class="hint">支持 PNG / JPG，单张 ≤ 20 MB</p>
+      </div>
+    </div>
+    <div class="preview-row" id="preview-row" hidden>
+      <img id="preview-img" alt="预览">
+      <div class="preview-info">
+        <p id="preview-name"></p>
+        <button class="btn ghost" id="btn-change">重新选择</button>
+      </div>
+    </div>
+
+    <h2>② 提取参数</h2>
+    <div class="param-row">
+      <label>刻度 OCR
+        <select id="ocr-select">
+          <option value="stub" selected>快速（标准答案刻度；上传图自动切换真实 OCR）</option>
+          <option value="paddle">真实识别（PaddleOCR，首次约 10-30s 加载模型）</option>
+        </select>
+      </label>
+      <label>曲线分割
+        <select id="segmenter-select">
+          <option value="unet" selected>深度学习 U-Net（推荐）</option>
+          <option value="cv">经典 CV（训练免，精度较低）</option>
+        </select>
+      </label>
+    </div>
+
+    <button class="btn primary big" id="btn-extract" disabled>
+      <span id="btn-label">③ 点击提取</span>
+    </button>
+    <p class="status" id="status"></p>
+  </section>
+
+  <!-- 结果区 -->
+  <section class="card" id="result-card" hidden>
+    <h2>提取结果</h2>
+    <div class="result-grid">
+      <figure>
+        <img id="overlay-img" alt="overlay 叠加图">
+        <figcaption>overlay 叠加图（红色/彩色曲线为提取结果）</figcaption>
+      </figure>
+      <div class="result-side">
+        <table class="summary" id="summary-table"></table>
+        <div class="downloads">
+          <a class="btn primary" id="dl-csv" download>⬇ 下载 CSV 数据</a>
+          <a class="btn primary" id="dl-json" download>⬇ 下载 JSON 数据</a>
+          <a class="btn primary" id="dl-overlay" download>⬇ 下载叠加图</a>
+        </div>
+      </div>
+    </div>
+    <p class="warnings" id="warnings"></p>
+  </section>
+
+  <!-- 示例图 -->
+  <section class="card" id="examples-card">
+    <h2>快捷测试（示例图，点击即提取）</h2>
+    <div class="examples" id="examples"></div>
+  </section>
+</main>
+
+<footer>
+  <p>materials-curve-intel · U-Net 512 + 坐标映射引擎 · 合成数据驱动 · 竞赛展示版</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
