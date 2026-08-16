@@ -99,10 +99,11 @@ git 历史、400 张训练数据、模型 checkpoint；`.gitignore` 排除了 `d
 
 - **启动**：`conda activate mci && cd F:\CODE\New\baseline && python web/app.py`
   （默认 http://127.0.0.1:8000，自动开浏览器；`--port`/`--no-browser` 可选）
-- 功能：上传 PNG/JPG → 提取 → overlay 叠加图展示 + 摘要表（曲线数/轴类型/耗时）→
-  下载 CSV / JSON / 叠加图；示例图一键测试（`data/synthetic`、`data/eval_platform`）；
-  后端自动将"无 GT 侧车的上传图"从 stub 回退到真实 PaddleOCR 并提示；启动时后台
-  预热 PaddleOCR。
+- 功能：上传 PNG/JPG（**支持批量多选/拖拽，串行提取、逐张状态与结果卡片**）→
+  提取 → overlay 叠加图展示 + 摘要表（曲线数/轴类型/耗时）→ 每张卡片独立下载
+  CSV / JSON / 叠加图；示例图一键测试（**内置 6 张于 `web/examples/` 已入库，
+  不依赖 data/**；data/ 存在时额外列出）；后端自动将"无 GT 侧车的上传图"从
+  stub 回退到真实 PaddleOCR 并提示；启动时后台预热 PaddleOCR。
 - 文件：`web/app.py`（FastAPI）+ `web/templates/index.html` + `web/static/`；
   任务产物在 `web/runs/`（gitignore）。详见 `web/README.md`。
 - 已知限制：单曲线管线（多曲线只输出主曲线，Phase C 接入后更新）；CPU OCR 慢
