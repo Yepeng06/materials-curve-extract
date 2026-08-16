@@ -147,10 +147,19 @@ class Extractor:
         # Phase B-2: whole-image text gives title / axis labels / units and
         # a log prior for the kind judgement (only when OCR provides boxes;
         # stub sidecars carry tick labels only, so titles stay empty there)
+        # whole-image OCR boxes are shared by the title reader and the
+        # legend matcher (one OCR call instead of two)
+        full_boxes: Optional[List[TextBox]] = None
+
+        def get_full_boxes() -> List[TextBox]:
+            nonlocal full_boxes
+            if full_boxes is None:
+                full_boxes = ocr.read_text_boxes(image)
+            return full_boxes
+
         titles: dict = {}
         try:
-            title_boxes = ocr.read_text_boxes(image)
-            titles = read_titles(title_boxes, structure)
+            titles = read_titles(get_full_boxes(), structure)
             # vertical y-axis titles need a rotated OCR pass; use it when
             # the horizontal pass missed the label or parsed no unit
             yl = titles.get("y_label")
@@ -185,7 +194,7 @@ class Extractor:
 
         # 5. legend matching (baseline no-op)
         t = time.time()
-        curves = match_legends(curves, structure, ocr.read_text_boxes(image), self.cfg)
+        curves = match_legends(curves, structure, get_full_boxes(), self.cfg)
         timings["legend"] = time.time() - t
 
         timings["total"] = time.time() - t0
