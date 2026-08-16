@@ -30,6 +30,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from ..schema import AxisKind, AxisRole, AxisSpec, AxisFitError, Tick
+from .axis_kind import judge_axis_kind, resolve_values
 
 
 def _fit(p: np.ndarray, v: np.ndarray) -> Tuple[float, float, float, float]:
@@ -135,8 +136,15 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     endpoint_pixels: (low, high) axis endpoint pixels in image coordinates
     (x: left/right of the axis line; y: top/bottom of the plot).  Used for
     the 0-start endpoint anchor (see above).
+
+    Phase B-3: the axis kind is decided by the multi-signal judge
+    (value-sequence consistency incl. 10N superscript re-resolution,
+    pixel-spacing minor-tick density, external prior); R^2 only grades the
+    chosen mapping and serves as the fallback when the judge abstains.
     """
-    valued = [(t.pixel, t.value) for t in ticks if t.value is not None]
+    values, _reread = resolve_values(ticks)
+    valued = [(t.pixel, v) for t, v in zip(ticks, values)]
+    valued = [(p, v) for (p, v) in valued if v is not None]
     if len(valued) < min_ticks:
         raise AxisFitError(
             f"{role.value}-axis: only {len(valued)} readable ticks "
@@ -149,16 +157,27 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     sign = 1 if role is AxisRole.X else -1
     p = sign * p_raw
 
-    # ---- RANSAC outlier rejection (robust vs misread tick values) ----
-    # Run RANSAC in both the linear and the log10 space; keep the space with
-    # more inliers and drop the outliers.  At least 3 ticks are always kept.
+    # ---- multi-signal kind judgement (B-3) ----
+    judged, evidence = judge_axis_kind(ticks, kind_hint)
+
+    # ---- RANSAC outlier rejection in the judged space (or both when
+    # the judge abstained); at least 3 ticks are always kept ----
     if len(v) >= 4:
-        inl_lin = _ransac_inliers(p, v)
-        inl_log = np.zeros(len(v), dtype=bool)
-        pos = v > 0
-        if int(pos.sum()) >= 4:
-            inl_log[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
-        keep = inl_lin if int(inl_lin.sum()) >= int(inl_log.sum()) else inl_log
+        if judged is AxisKind.LOG:
+            pos = v > 0
+            keep = np.ones(len(v), dtype=bool)
+            if int(pos.sum()) >= 4:
+                keep[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
+            keep = keep if int(keep.sum()) >= 3 else np.ones(len(v), dtype=bool)
+        elif judged is AxisKind.LINEAR:
+            keep = _ransac_inliers(p, v)
+        else:
+            inl_lin = _ransac_inliers(p, v)
+            inl_log = np.zeros(len(v), dtype=bool)
+            pos = v > 0
+            if int(pos.sum()) >= 4:
+                inl_log[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
+            keep = inl_lin if int(inl_lin.sum()) >= int(inl_log.sum()) else inl_log
         if int(keep.sum()) >= 3 and int(keep.sum()) < len(v):
             p = p[keep]
             v = v[keep]
@@ -175,27 +194,30 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
         a_log, b_log, r2_log, rms_log = _fit(p[pos], np.log10(v[pos]))
         ok_log = r2_log > 0.9 and np.isfinite(rms_log)
 
-    # decide axis kind
-    kind = AxisKind.LINEAR
-    if kind_hint == "log" and ok_log:
-        kind = AxisKind.LOG
-    elif kind_hint == "linear":
+    # decide axis kind: judge's vote wins; R^2 double-fit is the fallback
+    kind = judged
+    if kind is None:
         kind = AxisKind.LINEAR
-    elif kind_hint == "auto":
-        # log wins when it is clearly better: (a) its R^2 beats linear's by a
-        # wide margin, or (b) linear is not already near-perfect and its RMS
-        # is > 4x log's.  When both fits are essentially perfect (e.g. only
-        # 2 ticks, where any model interpolates exactly) linear wins — the
-        # common case in papers — and a warning is surfaced upstream.
-        if ok_log and (
-            r2_log > r2_lin + 0.01
-            or (r2_lin < 0.999 and rms_log < 0.25 * rms_lin)
-        ):
+        if kind_hint == "log" and ok_log:
             kind = AxisKind.LOG
+        elif kind_hint == "linear":
+            kind = AxisKind.LINEAR
+        elif kind_hint == "auto":
+            # log wins when it is clearly better: (a) its R^2 beats linear's
+            # by a wide margin, or (b) linear is not already near-perfect and
+            # its RMS is > 4x log's.  When both fits are essentially perfect
+            # (e.g. only 2 ticks, where any model interpolates exactly)
+            # linear wins -- the common case in papers.
+            if ok_log and (
+                r2_log > r2_lin + 0.01
+                or (r2_lin < 0.999 and rms_log < 0.25 * rms_lin)
+            ):
+                kind = AxisKind.LOG
 
-    if kind is AxisKind.LOG:
+    if kind is AxisKind.LOG and ok_log:
         slope, intercept, quality = a_log, b_log, r2_log
     else:
+        kind = AxisKind.LINEAR
         slope, intercept, quality = a_lin, b_lin, r2_lin
 
     return AxisSpec(
@@ -225,3 +247,4 @@ def build_axes(
         fit_axis(x_ticks, AxisRole.X, x_hint, endpoint_pixels=x_endpoints),
         fit_axis(y_ticks, AxisRole.Y, y_hint, endpoint_pixels=y_endpoints),
     )
+

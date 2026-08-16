@@ -144,3 +144,84 @@ def test_endpoint_anchor_needs_positive_span():
     with pytest.raises(AxisFitError):
         fit_axis(_ticks_x([0, 50, 100], [5, 5, 5]), AxisRole.X,
                  endpoint_pixels=(0.0, 100.0))
+
+
+# ---------------------------------------------------------------------------
+# Phase B-3: multi-signal kind judgement
+# ---------------------------------------------------------------------------
+def _ticks_x_text(px, texts):
+    from mci.schema import Tick
+    from mci.utils import parse_number_text
+
+    return [Tick(pixel=p, value=parse_number_text(t), text=t)
+            for p, t in zip(px, texts)]
+
+
+def test_10n_superscript_reread_log_axis():
+    # matplotlib log labels "10^-1 .. 10^3" glued by OCR into
+    # "0.1", "100", "101", "102", "103" -- the value sequence must be
+    # re-resolved to the geometric progression and judged log.
+    ticks = _ticks_x_text([80, 286, 492, 698, 904],
+                          ["0.1", "100", "101", "102", "103"])
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LOG, ax
+    assert ax.pixel_to_value(80) == pytest.approx(0.1, rel=1e-4)
+    assert ax.pixel_to_value(904) == pytest.approx(1000, rel=1e-4)
+
+
+def test_10n_not_reread_on_genuine_linear_axis():
+    # "100" on a linear axis is a real value; re-reading it as 10^0=1
+    # would break the arithmetic progression and must be rejected.
+    ticks = _ticks_x_text([0, 50, 100], ["0", "100", "200"])
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LINEAR
+    assert ax.pixel_to_value(0) == pytest.approx(0, rel=1e-9)
+    assert ax.pixel_to_value(100) == pytest.approx(200, rel=1e-9)
+
+
+def test_pixel_minor_ticks_vote_log():
+    # minor ticks every 5 px, majors at 0/50/100 (spacing ratio 10):
+    # dense minors vote log independently of the OCR values
+    px = list(range(0, 101, 5))
+    ticks = [Tick(pixel=float(p), value=None) for p in px]
+    ticks[0].value = 0.1
+    ticks[10].value = 1.0
+    ticks[20].value = 10.0
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LOG, ax
+
+
+def test_pixel_even_majors_only_abstains():
+    # majors-only evenly spaced ticks: no spacing evidence -> the R^2
+    # fallback decides (linear wins for the 1,2,3 values).
+    ticks = _ticks_x_text([0, 50, 100], ["1", "2", "3"])
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LINEAR
+
+
+def test_pixel_uniform_dense_ticks_abstain():
+    # uniform dense spacing (ratio 1): undecidable by pixels alone; the
+    # value sequence (geometric) must decide log.
+    px = list(range(0, 101, 10))
+    ticks = [Tick(pixel=float(p), value=None) for p in px]
+    ticks[0].value = 0.1
+    ticks[5].value = 1.0
+    ticks[10].value = 10.0
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LOG, ax  # value-sequence vote wins
+
+
+def test_judge_abstains_on_two_ticks():
+    from mci.pipeline.axis_kind import judge_axis_kind
+
+    ticks = _ticks_x_text([0, 100], ["0.1", "10"])
+    kind, _ = judge_axis_kind(ticks)
+    assert kind is None  # 2 ticks give no sequence/spacing evidence
+
+
+def test_judge_hint_prior_wins():
+    from mci.pipeline.axis_kind import judge_axis_kind
+
+    ticks = _ticks_x_text([0, 50, 100], ["1", "2", "3"])
+    kind, _ = judge_axis_kind(ticks, kind_hint="log")
+    assert kind is AxisKind.LOG  # external prior outweighs the value vote
