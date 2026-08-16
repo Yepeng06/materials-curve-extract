@@ -91,3 +91,56 @@ def test_roundtrip():
     for p, v in zip([0, 25, 50, 75, 100], [0, 2.5, 5, 7.5, 10]):
         assert ax.value_to_pixel(v) == pytest.approx(p, abs=1e-6)
         assert ax.pixel_to_value(p) == pytest.approx(v, abs=1e-6)
+
+
+def test_ransac_rejects_misread_tick():
+    # 5 ticks of a linear axis; one value misread by OCR (5 -> 30).
+    ticks = _ticks_x([0, 25, 50, 75, 100], [0, 2.5, 30, 7.5, 10])
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LINEAR
+    assert ax.pixel_to_value(0) == pytest.approx(0, abs=0.5)
+    assert ax.pixel_to_value(100) == pytest.approx(10, abs=0.5)
+    assert ax.quality > 0.99
+
+
+def test_ransac_log_keeps_geometric_ticks():
+    # Log-spaced ticks: the log-space RANSAC must win over the linear one
+    # (which would reject everything), keeping the geometric progression.
+    ticks = _ticks_x([0, 50, 100, 150], [0.1, 1.0, 10.0, 100.0])
+    ax = fit_axis(ticks, AxisRole.X)
+    assert ax.kind is AxisKind.LOG
+    assert ax.pixel_to_value(100) == pytest.approx(10, rel=1e-6)
+
+
+def test_endpoint_zero_anchor_stabilizes_three_ticks():
+    # 3 ticks with one slightly misread; the 0-start anchor pulls the fit
+    # back to the true 0..10 mapping over px 0..100.
+    ticks = _ticks_x([25, 50, 75], [2.5, 5.0, 7.6])
+    ax = fit_axis(ticks, AxisRole.X, endpoint_pixels=(0.0, 100.0))
+    assert ax.kind is AxisKind.LINEAR
+    assert ax.pixel_to_value(0) == pytest.approx(0, abs=0.15)
+    assert ax.pixel_to_value(100) == pytest.approx(10, abs=0.15)
+
+
+def test_endpoint_anchor_not_applied_when_axis_not_at_zero():
+    # Axis spans 20..80: extrapolation to the low endpoint is far from 0,
+    # so no anchor may be added.
+    ticks = _ticks_x([0, 50, 100], [20, 50, 80])
+    ax = fit_axis(ticks, AxisRole.X, endpoint_pixels=(0.0, 100.0))
+    assert ax.kind is AxisKind.LINEAR
+    assert ax.pixel_to_value(0) == pytest.approx(20, rel=1e-9)
+    assert ax.pixel_to_value(100) == pytest.approx(80, rel=1e-9)
+
+
+def test_endpoint_anchor_not_applied_to_log():
+    ticks = _ticks_x([0, 50, 100], [0.1, 1.0, 10.0])
+    ax = fit_axis(ticks, AxisRole.X, endpoint_pixels=(0.0, 100.0))
+    assert ax.kind is AxisKind.LOG
+    assert ax.pixel_to_value(0) == pytest.approx(0.1, rel=1e-6)
+
+
+def test_endpoint_anchor_needs_positive_span():
+    # duplicate values rejected before any anchoring happens
+    with pytest.raises(AxisFitError):
+        fit_axis(_ticks_x([0, 50, 100], [5, 5, 5]), AxisRole.X,
+                 endpoint_pixels=(0.0, 100.0))

@@ -79,6 +79,8 @@ def main() -> int:
                 meta = json.load(f)
             row["x_kind_gt"] = meta["x_kind"]
             row["y_kind_gt"] = meta["y_kind"]
+            row["n_ticks_x_gt"] = len(meta.get("x_tick_values", []))
+            row["n_ticks_y_gt"] = len(meta.get("y_tick_values", []))
             gt = load_gt(stem)
             result = extractor.extract(img_path)
             pred = np.array(result.curves[0].points)
@@ -86,6 +88,10 @@ def main() -> int:
             row.update(m)
             row["x_kind_pred"] = result.x_axis.kind.value
             row["y_kind_pred"] = result.y_axis.kind.value
+            row["n_ticks_x_read"] = sum(
+                1 for t in result.x_axis.ticks if t.value is not None)
+            row["n_ticks_y_read"] = sum(
+                1 for t in result.y_axis.ticks if t.value is not None)
             row["status"] = "ok"
             row["timing_s"] = round(result.meta["timings"]["total"], 3)
             row["warnings"] = "; ".join(result.warnings)

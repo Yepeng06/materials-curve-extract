@@ -43,6 +43,7 @@ class PaddleOCRBackend:
 
     strip_crops = True
     _init_lock = threading.Lock()
+    _shared: Dict[Tuple[str, str], "object"] = {}  # (lang, device) -> engine
 
     def __init__(self, lang: str = "en", device: str = "auto"):
         self.lang = lang
@@ -51,7 +52,12 @@ class PaddleOCRBackend:
 
     def _ensure(self):
         if self._ocr is None:
+            key = (self.lang, self.device)
             with PaddleOCRBackend._init_lock:  # 防多线程并发双初始化（Web 场景）
+                cached = PaddleOCRBackend._shared.get(key)
+                if cached is not None:
+                    self._ocr = cached
+                    return
                 if self._ocr is not None:
                     return
                 try:
@@ -79,6 +85,7 @@ class PaddleOCRBackend:
                     )
                     self._ocr = PaddleOCR(device="gpu" if use_gpu else "cpu", **kwargs)
                     self._device_used = "gpu" if use_gpu else "cpu"
+                    PaddleOCRBackend._shared[key] = self._ocr
                 except ImportError as e:  # pragma: no cover
                     raise TickReadingError(
                         "PaddleOCR is not installed; use --ocr stub or install "
@@ -195,7 +202,10 @@ def _ocr_strips(image_bgr: np.ndarray, structure: ChartStructure, ocr: "object",
     y_axis_col = structure.y_axis_pixel
     strip_h = min(h - x_axis_row - 1, max(80, h // 8))
     x_strip = image_bgr[x_axis_row - 6 : x_axis_row + strip_h, max(0, y_axis_col - 10) :, :]
-    strip_w = min(w, y_axis_col + 5)
+    # y-label strip width must NOT depend on y_axis_col (a misdetected axis
+    # column collapses it to a few px — the fail_001 root cause); use a
+    # generous left band of the image instead.
+    strip_w = min(w, max(40, int(w * 0.30)))
     y_strip = image_bgr[max(0, y0 - 20) : min(h, x_axis_row + 20), :strip_w, :]
 
     scale = 2
@@ -215,32 +225,91 @@ def _ocr_strips(image_bgr: np.ndarray, structure: ChartStructure, ocr: "object",
     return boxes
 
 
+def _merge_boxes(a: List[TextBox], b: List[TextBox], tol: float = 10.0) -> List[TextBox]:
+    """Merge two box lists, keeping a's boxes on near-duplicates."""
+    out = list(a)
+    for bx in b:
+        cx, cy = bx.center
+        if all((cx - o.center[0]) ** 2 + (cy - o.center[1]) ** 2 > tol * tol
+               for o in out):
+            out.append(bx)
+    return out
+
+
+def _classify_labels(
+    boxes: List[TextBox], structure: ChartStructure
+) -> Tuple[List[TextBox], List[TextBox]]:
+    """Split OCR boxes into x- and y-tick labels by region rules.
+
+    Region rules (loose on purpose -- non-numeric text simply fails to parse
+    later and is harmless):
+
+    * x label: center below the bottom axis line, within the plot width
+      (plus a 15% margin on each side).
+    * y label: center inside the left 25% of the plot width, above the
+      bottom axis line, and below the title zone (title sits further above
+      the plot top).  Deliberately does NOT depend on the absolute
+      y_axis_col boundary -- a misdetected axis column must not reject
+      every y label (fail_001 root cause).
+    """
+    x0, y0, x1, y1 = structure.plot_bbox
+    x_axis_row = structure.x_axis_pixel
+    plot_w = max(1, x1 - x0)
+    plot_h = max(1, x_axis_row - y0)
+
+    x_labels = [
+        b for b in boxes
+        if b.center[1] > x_axis_row + 2
+        and x0 - 0.15 * plot_w <= b.center[0] <= x1 + 0.15 * plot_w
+    ]
+    y_labels = [
+        b for b in boxes
+        if b.center[0] < x0 + 0.25 * plot_w
+        and b.center[1] < x_axis_row + 10  # allow labels hugging the axis row
+        and b.center[1] > y0 - 0.3 * plot_h
+    ]
+    return x_labels, y_labels
+
+
 def read_ticks(
     image_bgr: np.ndarray,
     structure: ChartStructure,
     ocr: "object",
     cfg: Optional[Dict] = None,
 ) -> Tuple[List[Tick], List[Tick]]:
-    """OCR the chart (or its axis strips), classify labels by axis, associate."""
+    """OCR the chart (or its axis strips), classify labels by axis, associate.
+
+    Whole-image OCR fallback: when a strip-based backend yields fewer than
+    two valued ticks on either axis (strip crops missed the labels), re-run
+    OCR on the full image, merge the boxes and re-classify.  The fail_001
+    sample reads every tick label correctly on the full image.
+    """
     cfg = cfg or {}
     tol = float(cfg.get("tick_assoc_tol_px", 80))
+    can_strip = bool(getattr(ocr, "strip_crops", False))
     boxes = _ocr_strips(image_bgr, structure, ocr, cfg)
+
+    x_ticks: List[Tick] = []
+    y_ticks: List[Tick] = []
+    for attempt in (0, 1):
+        x_labels, y_labels = _classify_labels(boxes, structure)
+        x_ticks = _associate(structure.x_ticks_px, x_labels, "x", tol)
+        y_ticks = _associate(structure.y_ticks_px, y_labels, "y", tol)
+        nv_x = sum(1 for t in x_ticks if t.value is not None)
+        nv_y = sum(1 for t in y_ticks if t.value is not None)
+
+        def _enough(nv, marks):
+            # >= 2 valued ticks, or (few read but many tick marks detected ->
+            # the strip OCR likely missed labels; a whole-image pass may help)
+            return nv >= 2 and not (nv <= 2 and len(marks) >= 4)
+
+        if not can_strip or (
+            _enough(nv_x, structure.x_ticks_px)
+            and _enough(nv_y, structure.y_ticks_px)
+        ):
+            break
+        if attempt == 0:
+            boxes = _merge_boxes(boxes, ocr.read_text_boxes(image_bgr))
     if not boxes:
         raise TickReadingError("OCR returned no text boxes")
-
-    x0, y0, x1, y1 = structure.plot_bbox
-    x_axis_row = structure.x_axis_pixel
-    y_axis_col = structure.y_axis_pixel
-
-    x_labels = [
-        b for b in boxes
-        if b.center[1] > x_axis_row + 2 and x0 - 40 <= b.center[0] <= x1 + 40
-    ]
-    y_labels = [
-        b for b in boxes
-        if b.center[0] < y_axis_col - 2 and b.center[1] <= y1 + 10
-    ]
-
-    x_ticks = _associate(structure.x_ticks_px, x_labels, "x", tol)
-    y_ticks = _associate(structure.y_ticks_px, y_labels, "y", tol)
     return x_ticks, y_ticks

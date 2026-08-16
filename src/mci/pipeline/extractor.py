@@ -127,10 +127,15 @@ class Extractor:
 
         # 3. coordinate mapping (linear/log auto detection)
         t = time.time()
+        # endpoint pixels (x: axis line left/right; y: plot top/bottom) feed
+        # the 0-start endpoint anchor in fit_axis
+        x0, y0, x1, y1 = structure.plot_bbox
         x_axis, y_axis = build_axes(
             x_ticks, y_ticks,
             self.cfg.get("x_kind_hint", "auto"),
             self.cfg.get("y_kind_hint", "auto"),
+            x_endpoints=(float(structure.y_axis_pixel), float(x1)),
+            y_endpoints=(float(y0), float(structure.x_axis_pixel)),
         )
         timings["axes"] = time.time() - t
         if x_axis.quality < 0.99:

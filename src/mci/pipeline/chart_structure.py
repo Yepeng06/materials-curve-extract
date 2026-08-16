@@ -44,6 +44,7 @@ def _group_runs(values: np.ndarray, gap: int = 3) -> List[float]:
 def detect_structure(image_bgr: np.ndarray, cfg: Dict | None = None) -> ChartStructure:
     cfg = cfg or {}
     frac_thr = float(cfg.get("axis_frac_threshold", 0.45))
+    edge_frac = float(cfg.get("axis_edge_exclude", 0.03))
     h, w = image_bgr.shape[:2]
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     ink = ink_mask(gray)
@@ -54,14 +55,41 @@ def detect_structure(image_bgr: np.ndarray, cfg: Dict | None = None) -> ChartStr
     rows = np.where(row_frac > frac_thr)[0]
     if len(rows) == 0:
         raise StructureDetectionError("no horizontal axis line found")
-    y_axis = int(rows[-1])
+    # Robustness: a full-width figure border / crop residue below the axis
+    # must not be picked as the bottom axis line, so exclude bottom-edge
+    # rows first (fall back to the raw rows if the cut removes everything).
+    bottom_cut = int(h * (1.0 - edge_frac))
+    rows_ok = rows[rows < bottom_cut]
+    if len(rows_ok) == 0:
+        rows_ok = rows
+    y_axis = int(rows_ok[-1])
+    # x-axis line thickness: the contiguous run of ink-full rows ending at
+    # y_axis (lines render 1-5 px depending on width/antialiasing).  Used to
+    # keep the axis line itself out of tick/interior checks below.
+    axis_top = y_axis
+    for r in rows_ok[::-1][1:]:
+        if r == axis_top - 1:
+            axis_top = r
+        else:
+            break
 
     # ---- vertical profile above the axis -> left axis ----
-    col_frac = ink[: y_axis + 1, :].mean(axis=0).astype(np.float64)
-    cols = np.where(col_frac > frac_thr)[0]
+    # Central scan: exclude the left/right edge columns (failure sample
+    # fail_001 had left-edge crop residue misdetected as the y axis, which
+    # set y_axis_pixel=0 and collapsed the OCR strip).  Connectivity check:
+    # the y-axis line must reach the x-axis line at the corner (ink in the
+    # rows around y_axis); otherwise try the next candidate column.
+    edge_w = max(3, int(w * edge_frac))
+    col_frac = ink[: y_axis + 1, edge_w : w - edge_w].mean(axis=0).astype(np.float64)
+    cols = np.where(col_frac > frac_thr)[0] + edge_w
     if len(cols) == 0:
         raise StructureDetectionError("no vertical axis line found")
     x_axis = int(cols[0])
+    if not ink[max(0, y_axis - 3) : y_axis + 3, x_axis].any():
+        for c in cols[1:]:
+            if ink[max(0, y_axis - 3) : y_axis + 3, int(c)].any():
+                x_axis = int(c)
+                break
 
     # ---- content bounds inside the plot ----
     band_x0 = x_axis + 2
@@ -94,28 +122,45 @@ def detect_structure(image_bgr: np.ndarray, cfg: Dict | None = None) -> ChartStr
     if y_axis - y0 < 10 or x1 - band_x0 < 10:
         raise StructureDetectionError("plot area too small after detection")
 
-    # ---- tick marks ----
+    # ---- tick marks (multi-scale band voting) ----
     # Ticks are short strokes attached to the axis line; tick labels sit
-    # further out with a gap.  Detect ink in the narrow band right below /
-    # left of the axis so label glyph tops are never mistaken for ticks,
-    # and reject columns whose ink continues into the plot interior (the
-    # curve hugging the bottom axis would otherwise pollute the ticks).
-    tick_band = 5
+    # further out with a gap.  A single fixed band width is brittle (long
+    # ticks fall out of a narrow band; label glyphs pollute a wide one), so
+    # detect across several band widths and keep positions seen by >= 2
+    # scales.  Columns whose ink continues into the plot interior (the curve
+    # hugging the bottom axis) are still rejected.
+    tick_scales = (2, 5, 8)
+    # interior connectivity check band: strictly above the axis line itself
+    interior_top = max(0, axis_top - 12)
+    interior_bot = max(0, axis_top - 2)
     # x-axis ticks: short vertical strokes just below the bottom axis line,
     # restricted to the right of the y-axis (y tick labels live left of it
     # and would otherwise pollute the band at the same rows)
-    x_band = ink[y_axis + 2 : min(y_axis + 2 + tick_band, h), x_axis + 2 :]
-    x_ticks_px = []
-    for col in np.where(x_band.sum(axis=0) >= 2)[0]:
-        col = x_axis + 2 + col
-        if ink[max(0, y_axis - 12) : y_axis - 2, col].any():
-            continue  # connected to interior content (the curve), not a tick
-        x_ticks_px.append(float(col))
-    x_ticks_px = _group_runs(np.asarray(x_ticks_px))
+    x_votes: Dict[int, int] = {}
+    for bw in tick_scales:
+        x_band = ink[y_axis + 2 : min(y_axis + 2 + bw, h), x_axis + 2 :]
+        for col in np.where(x_band.sum(axis=0) >= 2)[0]:
+            col = x_axis + 2 + int(col)
+            if ink[interior_top:interior_bot, col].any():
+                continue  # connected to interior content (the curve), not a tick
+            x_votes[col] = x_votes.get(col, 0) + 1
+    x_ticks_px = _group_runs(
+        np.asarray([c for c, n in x_votes.items() if n >= 2], dtype=np.float64)
+    )
     # y-axis ticks: short horizontal strokes just left of the left axis line
-    # (the curve is always to the RIGHT of the axis, so no interior check)
-    y_band = ink[:, max(0, x_axis - 2 - tick_band) : max(0, x_axis - 2)]
-    y_ticks_px = _group_runs(np.where(y_band.sum(axis=1) >= 2)[0])
+    # (the curve is always to the RIGHT of the axis, so no interior check;
+    # the x-axis line itself is excluded by row range)
+    y_votes: Dict[int, int] = {}
+    for bw in tick_scales:
+        y_band = ink[:, max(0, x_axis - 2 - bw) : max(0, x_axis - 2)]
+        for row in np.where(y_band.sum(axis=1) >= 2)[0]:
+            row = int(row)
+            if axis_top <= row <= y_axis:
+                continue  # the x-axis line itself, not a y tick
+            y_votes[row] = y_votes.get(row, 0) + 1
+    y_ticks_px = _group_runs(
+        np.asarray([r for r, n in y_votes.items() if n >= 2], dtype=np.float64)
+    )
 
     structure = ChartStructure(
         plot_bbox=(band_x0, y0, x1, y_axis - 1),

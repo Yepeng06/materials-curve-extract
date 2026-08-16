@@ -11,6 +11,17 @@ p (x-axis: image x; y-axis: negated image y).  This fit-comparison is the
 baseline for the "coordinate type judgement" module; in the full project it
 can be replaced/augmented by a dedicated classifier, but the residuals give
 a hard statistical guarantee and are cheap.
+
+Phase B-1 hardening:
+  * RANSAC outlier rejection before fitting (misread tick values are the
+    dominant real-OCR failure mode): with >= 4 valued ticks we run RANSAC in
+    both the linear and the log10 space, keep the space with more inliers
+    and drop the outliers (at least 3 ticks are always kept).
+  * Endpoint anchor: when the axis plausibly starts at 0 (the extrapolated
+    value at the low-value axis endpoint is within 2% of the tick span) the
+    endpoint pixel is anchored at value 0 and joins the fit.  This stabilizes
+    the mapping in the common 2-tick case, where a single misread destroys
+    the fit (any model interpolates 2 points exactly).
 """
 from __future__ import annotations
 
@@ -32,11 +43,98 @@ def _fit(p: np.ndarray, v: np.ndarray) -> Tuple[float, float, float, float]:
     return float(a), float(b), r2, rms
 
 
+def _ransac_inliers(
+    p: np.ndarray, v: np.ndarray, n_iter: int = 100,
+    tol_frac: float = 0.05, seed: int = 12345,
+) -> np.ndarray:
+    """RANSAC inlier mask for the 1-D linear model v = a * p + b.
+
+    A position is an inlier when its residual is within tol_frac of the
+    value span.  Returns all-True for fewer than 4 points (no rejection).
+    """
+    n = len(p)
+    inl = np.ones(n, dtype=bool)
+    if n < 4:
+        return inl
+    span = float(np.ptp(v))
+    if span <= 1e-12:
+        return inl
+    tol = tol_frac * span
+    rng = np.random.default_rng(seed)
+    best: Optional[np.ndarray] = None
+    for _ in range(n_iter):
+        i, j = rng.choice(n, 2, replace=False)
+        if abs(p[i] - p[j]) < 1e-9:
+            continue
+        a = (v[i] - v[j]) / (p[i] - p[j])
+        b = v[i] - a * p[i]
+        m = np.abs(a * p + b - v) <= tol
+        if best is None or int(m.sum()) > int(best.sum()):
+            best = m
+            if int(best.sum()) == n:
+                break
+    return best if best is not None else inl
+
+
+def _fit_with_endpoint_zero(
+    p: np.ndarray, v: np.ndarray, sign: int,
+    endpoint_pixels: Optional[Tuple[float, float]],
+) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """Anchor the low-value axis endpoint at 0 when extrapolation supports it.
+
+    Returns (p, v) with the anchor appended and a flag saying whether the
+    anchor was added.  The low-value endpoint in image pixels is the min
+    pixel for the x axis (sign=+1) and the max pixel for the y axis
+    (sign=-1).  The anchor is only added when the provisional linear fit
+    extrapolates to within 2% of the tick value span - i.e. the axis
+    plausibly starts at 0 (extremely common in data plots).
+    """
+    if endpoint_pixels is None or len(v) < 2:
+        return p, v, False
+    span_v = float(np.ptp(v))
+    if span_v <= 1e-9:
+        return p, v, False
+    # When the ticks already include a value at (or very near) 0, the axis
+    # start is anchored by that tick itself — adding the endpoint pixel
+    # would only inject the label-center vs axis-line pixel offset as a
+    # systematic error.
+    if abs(float(v.min())) <= 0.02 * span_v:
+        return p, v, False
+    e0, e1 = sorted(float(x) for x in endpoint_pixels)
+    low_px = e0 if sign == 1 else e1
+    a0, b0 = np.polyfit(p, v, 1)
+    resid = a0 * p + b0 - v
+    v_low = a0 * (sign * low_px) + b0
+    if len(v) == 2:
+        # no residual degrees of freedom: require an absolute agreement
+        if abs(v_low) > 0.005 * span_v:
+            return p, v, False
+    else:
+        # statistical test: 0 must lie within ~2 sigma of the extrapolated
+        # low-end value (an axis that really starts at 0 extrapolates to
+        # ~0 within the fit's own noise; e.g. a 0.1..0.7 axis extrapolates
+        # to ~0.006 and must NOT be anchored)
+        sigma = float(np.sqrt(np.sum(resid ** 2) / (len(v) - 2)))
+        denom = float(np.sum((p - p.mean()) ** 2))
+        se_low = sigma * float(np.sqrt(1.0 / len(v) + (sign * low_px - p.mean()) ** 2 / denom)) if denom > 1e-9 else float("inf")
+        if se_low <= 1e-12 or abs(v_low) > 2.0 * se_low:
+            return p, v, False
+    return (
+        np.concatenate([p, [sign * low_px]]),
+        np.concatenate([v, [0.0]]),
+        True,
+    )
+
+
 def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
-             min_ticks: int = 2) -> AxisSpec:
+             min_ticks: int = 2,
+             endpoint_pixels: Optional[Tuple[float, float]] = None) -> AxisSpec:
     """Fit one axis mapping from valued ticks.
 
     kind_hint: "auto" | "linear" | "log"  (config-level override / prior).
+    endpoint_pixels: (low, high) axis endpoint pixels in image coordinates
+    (x: left/right of the axis line; y: top/bottom of the plot).  Used for
+    the 0-start endpoint anchor (see above).
     """
     valued = [(t.pixel, t.value) for t in ticks if t.value is not None]
     if len(valued) < min_ticks:
@@ -51,12 +149,29 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     sign = 1 if role is AxisRole.X else -1
     p = sign * p_raw
 
+    # ---- RANSAC outlier rejection (robust vs misread tick values) ----
+    # Run RANSAC in both the linear and the log10 space; keep the space with
+    # more inliers and drop the outliers.  At least 3 ticks are always kept.
+    if len(v) >= 4:
+        inl_lin = _ransac_inliers(p, v)
+        inl_log = np.zeros(len(v), dtype=bool)
+        pos = v > 0
+        if int(pos.sum()) >= 4:
+            inl_log[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
+        keep = inl_lin if int(inl_lin.sum()) >= int(inl_log.sum()) else inl_log
+        if int(keep.sum()) >= 3 and int(keep.sum()) < len(v):
+            p = p[keep]
+            v = v[keep]
+
+    # ---- endpoint anchor: axis starts near 0 (linear, low end) ----
+    p, v, anchored = _fit_with_endpoint_zero(p, v, sign, endpoint_pixels)
+
     a_lin, b_lin, r2_lin, rms_lin = _fit(p, v)
 
     ok_log = False
     a_log = b_log = r2_log = rms_log = float("inf")
     pos = v > 0
-    if pos.sum() >= min_ticks:
+    if int(pos.sum()) >= min_ticks:
         a_log, b_log, r2_log, rms_log = _fit(p[pos], np.log10(v[pos]))
         ok_log = r2_log > 0.9 and np.isfinite(rms_log)
 
@@ -103,8 +218,10 @@ def build_axes(
     y_ticks: List[Tick],
     x_hint: str = "auto",
     y_hint: str = "auto",
+    x_endpoints: Optional[Tuple[float, float]] = None,
+    y_endpoints: Optional[Tuple[float, float]] = None,
 ) -> Tuple[AxisSpec, AxisSpec]:
     return (
-        fit_axis(x_ticks, AxisRole.X, x_hint),
-        fit_axis(y_ticks, AxisRole.Y, y_hint),
+        fit_axis(x_ticks, AxisRole.X, x_hint, endpoint_pixels=x_endpoints),
+        fit_axis(y_ticks, AxisRole.Y, y_hint, endpoint_pixels=y_endpoints),
     )
