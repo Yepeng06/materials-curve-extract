@@ -4,6 +4,9 @@
 > 本文件可修改（不同于上级 Prompt.md）。
 > 交接日期：2026-08-16（Phase A + B-1~B-4 全部完成；paddle 达标率 24.5%→70%）
 > **下一对话优先做「不需要训练模型」的工作**（见 §五标注），训练类工作（Phase C 分割等）需先请示。
+> **用户强调：无论何时都要先做深入研究（论文/社区文档/官方文档）再设计动手**——
+> §五每项已附初步研究依据（2026-08-16 调研），新对话须先复核/扩充再实施。
+> **真实文献曲线图仍在收集中**（Phase A.3 用户任务，到位后优先 B-5 真实图验证）。
 
 ## 〇、先读这些（每次会话开始必读）
 
@@ -117,31 +120,62 @@
 - **收集 ≥50 张真实论文蠕变图**（先 10-15 张）→ `data/real_papers/raw/` + gold 标注
   （指南已就位）；测试中遇到失败图直接放 `data/failures/` 或发路径
 
+## 四.5、前期研究依据（2026-08-16 调研，新对话须复核扩充）
+
+**刻度文本/坐标校准（5.1 相关）：**
+- 学界范式：区域检测 + 文本角色分类（ChartEye arXiv:2408.16123；ICDAR CHART-Infographics
+  IEEE 8978105；PlotQA）——B-2/B-4 已按此实现（YOLO axis_title + title_reader 角色分类）
+- OCR 刻度值错误检测 = 序列一致性校验（US 专利 20190130614A1：robust to errors in the
+  OCR ... wrong numerical value for the tick, an error detection）——与 B-3 的等差/等比
+  校验思路一致（业界标准做法）
+- 小字/低分辨率 OCR 增强：条带放大 2-4x、CLAHE、多尺度投票（PaddleOCR 官方优化实践：
+  developer.baidu.com/article/detail.html?id=3696085、cloud.baidu.com/article/3693196；
+  PaddleOCR Discussion #14271 limit_type/limit_side_len 参数陷阱）
+- 坐标校准社区实践：WebPlotDigitizer DeepWiki 5.1 automated-detection-algorithms /
+  4.2 data-extraction（自动刻度检测 + 颜色分离算法细节）
+
+**多曲线提取（5.2/5.5 相关）：**
+- **LineFormer**（arXiv:2305.01837）：折线图数据提取 = **实例分割**（而非语义分割），
+  逐实例回归像素线——Phase C 实例分割的学术依据；社区已有 HuggingFace 权重
+  （t29mato/lineformer-battery-finetuned，电池放电曲线微调版可参考）
+- **Socratic Chart**（arXiv:2504.09764）：多代理协作图表理解 + 掩码形态学细化
+  （腐蚀/膨胀/高斯模糊增强掩码）——掩码后处理可借鉴
+- **Efficient extraction of experimental data from line charts**（Graphical Models
+  2025, doi:10.1016/j.gmod.2025.101259）：端到端管线（找轴范围→逐线提取）
+- **Extracting Color Mappings**（UW InfoVis 2018）：图例颜色映射提取——legend 匹配
+  （图例色块 ↔ 曲线颜色）的算法依据
+- 社区确定性方案：thu-digitizer（github.com/Rimagination/thu-digitizer）：
+  evidence-first 数字化（确定性提取器 + 结果校验 + 可审计图库）——工程化思路可借鉴
+
 ## 五、下一步计划（按优先级；标注【无需训练】的优先做）
 
+**执行纪律：** 每项开工前先做 ≥1 轮 web/论文调研复核上表依据，补充新文献后再设计；
+设计文档（1 页内）先给用户确认再实现。
+
 ### 5.1【无需训练】B-5a：OCR 刻度值误读增强（paddle 达标率 70%→90% 攻坚）
-- **多尺度 OCR 投票**：条带 1x/2x/4x 识别，同框文本按 score×长度投票（AXIS 层1 #3）
-- **刻度值领域词典/上下文校验**：读值需与相邻刻度成等差/等比（已部分实现）；
-  误读值（0.1→'100'）在映射阶段检测：映射后曲线超出合理范围 → 触发整图重读
-- **条带 CLAHE 预处理**（AXIS 层1 #4）；旋转刻度（真实图 y 轴竖排，AXIS 根因 #6）
-- 验证：paddle 平台 100 张达标率（当前 70%）；真实图收集后人工对照
+- 依据：多尺度投票（AXIS 层1 #3 + PaddleOCR 社区实践）；序列校验（专利 20190130614A1
+  思路，B-3 已实现基础版）；旋转刻度（AXIS 根因 #6）
+- 方案（待调研复核）：① 条带 1x/2x/4x 多尺度 OCR 投票（score×长度加权）；② 刻度值
+  领域词典 + 序列上下文修正；③ 条带 CLAHE 预处理；④ 真实图竖排 y 刻度旋转识别
+  （复用 B-2 旋转经验，CW 方向）
 
 ### 5.2【无需训练】Phase C 前半：多曲线评估基建
-- 多曲线评估指标（F1/召回、DTW、逐曲线 RMSE）——数据已就绪（train_platform 多曲线
-  + _curves.json + _cN.csv）；evaluate.py 多曲线模式
-- legend_matcher 增强（整图 OCR 图例文本 + 颜色/线型关联——OCR 已能读 'Curve 1'）
-- **U-Net K 通道/实例分割训练（需训练）**放后半，先请示
+- 依据：LineFormer 实例分割思路（后段）；先做评估基建不依赖训练
+- 方案（待调研复核）：① 多曲线指标（F1/召回、DTW、逐曲线 RMSE）——数据已就绪
+  （train_platform 2000 张多曲线 + _curves.json + _cN.csv + 掩码）；② legend_matcher
+  增强：整图 OCR 图例文本（已可读）+ 颜色映射关联（UW ColorMappings 思路）；
+  ③ evaluate.py 多曲线模式（每曲线独立评估）
 
 ### 5.3【无需训练】Web 演示增强
-- 结果卡片已展示标题/轴标题；可加：多曲线展示、失败图一键导出到 data/failures/
+- 结果卡片已展示标题/轴标题；可加：多曲线展示、失败图一键导出 data/failures/
 
 ### 5.4【无需训练】Phase D 准备（验收材料）
 - 500 张独立 seed 验收集生成（dataset_builder --num-curves 1 --count 500 --seed <新>）
 - 测试报告整理（全部评估表 + ablation：CV vs YOLO 结构、stub vs paddle、判型各信号）
 
 ### 5.5【需训练，先请示】Phase C 后半：多曲线分割
-- U-Net K 通道/实例分割（数据已就绪：2000 张 2-4 曲线 + 掩码）；组件评分 top-K
-+ 颜色分离；多曲线召回 ≥95% 验收
+- **LineFormer 式实例分割**（arXiv:2305.01837）或 U-Net K 通道；数据已就绪
+  （2000 张 2-4 曲线）；组件评分 top-K + 颜色分离；多曲线召回 ≥95% 验收
 
 ### 5.6【需训练，先请示】其他训练类
 - B-4 增强：x_axis_line 检测弱（mAP50 0.749）→ 更大 imgsz/更长训练/标签细化
@@ -151,11 +185,7 @@
 - 用户收集图到位后：`--ocr paddle` 评估（无 labels.json 不能走 stub）；失败图自动归
   入 data/failures/ 回归；gold 标注对比 RMSE
 
-## 六、已知的技术坑（务必先读）
 
-1. **Windows DLL 冲突**：torch 与 paddle 同进程互斥（WinError 127）。OCR 用 CPU paddle
-   （enable_mkldnn=False）；PaddleOCRBackend._ensure 先 import torch 再 import paddle
-   （类级缓存 + 初始化锁，勿回退）。
 2. **numpy 固定 1.26.4**（mci 环境）。
 3. **matplotlib 渲染差异**：GT 像素用 `fig.canvas.buffer_rgba()`，勿用 savefig 反推。
 4. **conda 问题**：`conda run` 偶发插件报错/极慢（stderr 刷屏）——改用
@@ -179,9 +209,19 @@
 15. **PaddleOCR 长条带**：超长条带被 resize 到 max_side_limit 4000 内变形——条带
     裁剪要合理。
 
+## 六、已知的技术坑（务必先读）
+
+1. **Windows DLL 冲突**：torch 与 paddle 同进程互斥（WinError 127）。OCR 用 CPU paddle
+   （enable_mkldnn=False）；PaddleOCRBackend._ensure 先 import torch 再 import paddle
+   （类级缓存 + 初始化锁，勿回退）。
+
 ## 七、工作约定（继承 Prompt.md 六大要求）
 
 - 每次会话开始重读 `Prompt.md` + 本文件 + `AXIS_TEXT_RESEARCH.md` + git log/status；
+- **（用户强调，2026-08-16）无论何时先做深入研究再动手**：每项工作开工前 ≥1 轮
+  web_search/论文/社区/官方文档调研（优先 arXiv、IEEE、官方仓库、DeepWiki），形成
+  1 页内设计依据（§四.5 已有基础），先给用户确认设计再实现；实现中遇技术决策同样
+  先查证再定；
 - 一切工作先调研（论文/官方文档/社区）再设计，**先请示用户再执行**；
 - 每步改动跑 `python -m pytest tests -q` 与 `scripts/evaluate.py --ocr stub` 回归，
   **指标不得回退**（stub 基准：合成 med ≤0.40%/87.5%、平台 ≤1% 达标率 100%）；
