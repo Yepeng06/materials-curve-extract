@@ -101,6 +101,33 @@ def resolve_values(ticks: List[Tick]) -> Tuple[List[Optional[float]], bool]:
     return base, False
 
 
+def _majority_consistency(vals: List[float]) -> Optional[AxisKind]:
+    """Tolerant vote: a majority (>=50%) of adjacent gaps/ratios agree.
+
+    Handles 1-2 misread tick values that would otherwise poison the strict
+    sequence check (e.g. '200' read as '20', or a duplicated '0'): the
+    dominant gap (linear) or dominant log10 ratio (log) wins.
+    """
+    v = sorted(vals)
+    if len(v) < 4:
+        return None
+    d = np.diff(v)
+    best: Tuple[AxisKind, float] = (AxisKind.LINEAR, 0.0)
+    med_d = float(np.median(d))
+    if abs(med_d) > 1e-9:
+        frac = float(np.mean(np.abs(d - med_d) <= 0.1 * abs(med_d)))
+        best = (AxisKind.LINEAR, frac)
+    pos = np.array([x for x in v if x > 0])
+    if len(pos) >= 4:
+        r = np.diff(np.log10(pos))
+        med_r = float(np.median(r))
+        if abs(med_r) > 1e-9:
+            frac = float(np.mean(np.abs(r - med_r) <= 0.1 * abs(med_r)))
+            if frac > best[1]:
+                best = (AxisKind.LOG, frac)
+    return best[0] if best[1] >= 0.5 else None
+
+
 def _value_sequence_vote(vals: List[float]) -> Optional[AxisKind]:
     """Vote from value-sequence consistency (None = abstain)."""
     if len(vals) == 2:
@@ -122,7 +149,8 @@ def _value_sequence_vote(vals: List[float]) -> Optional[AxisKind]:
         return None
     lin, log = s
     if min(lin, log) > 0.1:
-        return None  # neither progression holds (misreads remain)
+        # neither strict progression holds: tolerate a minority of misreads
+        return _majority_consistency(vals)
     if log < lin:
         return AxisKind.LOG
     if lin < log:
