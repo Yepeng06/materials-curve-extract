@@ -156,16 +156,11 @@ stub 双路径精确回退基线；paddle 达标率 24.5%→48%）
   解析率 100%（目标 ≥90% 达成）**；验证脚本 scripts/eval_titles_batch.py +
   scripts/eval_title_stats.py
 
-### Phase B-3：坐标类型判别三信号融合（实施中，2026-08-16）
-- axis_kind.py：三信号投票 —— ① 值序列一致性（等差/等比，含 **'10N' 上标粘连
-  重解析**：matplotlib log 标签 '10²' 被 OCR 读成 '102' → 重读为 10^N，修复
-  paddle x log 轴 36/37 全判错的头号根因）；② 像素间距（次刻度密度，限有值范围、
-  去重、单一间距 abstain）；③ 外部先验（B-2 log_hint，权重 2）
-- R² 双拟合降级为 fallback + 质量分；RANSAC 在判定空间剔除
-- 修复过程中发现并解决：resolve_values 长度错位（无值 tick）、重复刻度污染
-  值序列（<3px 去重取高 score）
-- **pytest 89/89（新增 B-3/B-2 测试 11 项）**；stub 双路径精确回退基线、轴类型
-  100%；paddle 平台重评估进行中（med 0.14%→0.08%，达标率待最终数字）
+### Phase B-3：坐标类型判别三信号融合（✅ 已完成 2026-08-16，pytest 89/89）
+- axis_kind.py 三信号投票：① 值序列一致性（等差/等比 + **'10N' 上标粘连重解析**：
+  matplotlib log 标签 '10²'→OCR '102' → 重读 10^N；模糊序列（100/101/102/103 等差
+
+
 
 ### Phase B-4：YOLOv8-nano 结构检测（实施中，2026-08-16）
 - train/train_detection.py 已创建（交接文件提及但原不存在）；数据 2000 张
