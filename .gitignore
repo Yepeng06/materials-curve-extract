@@ -6,6 +6,7 @@ web/runs/
 *.jpeg
 !data/.gitkeep
 !data/*.py
+!web/examples/
 
 # python
 __pycache__/

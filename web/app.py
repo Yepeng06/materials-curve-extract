@@ -54,7 +54,10 @@ APP_VERSION = "mci-web-demo-1.0"
 RUNS_DIR = _ROOT / "web" / "runs"
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg"}
 MAX_UPLOAD_MB = 20
+# 内置示例图入库（web/examples/，带 labels.json 侧车，stub 可用）；
+# 数据目录（gitignore）存在时作为补充来源。
 EXAMPLE_GLOBS = [
+    (_ROOT / "web" / "examples", "内置示例"),
     (_ROOT / "data" / "synthetic", "合成测试集"),
     (_ROOT / "data" / "eval_platform", "平台模板集"),
 ]
@@ -140,7 +143,7 @@ def list_examples() -> JSONResponse:
             and not p.endswith("_mask.png")
         )
         for name in names[:6]:
-            items.append({"name": name, "group": label,
+            items.append({"name": name, "group": base_dir.name, "group_label": label,
                           "url": f"/api/examples/file?group={base_dir.name}&name={name}"})
     return JSONResponse({"items": items})
 

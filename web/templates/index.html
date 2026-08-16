@@ -9,28 +9,22 @@
 <body>
 <header>
   <h1>材料科学图像曲线智能识别与解析</h1>
-  <p class="sub">上传曲线图 → 一键提取 → 叠加图展示 → 结构化数据下载</p>
+  <p class="sub">上传曲线图（支持批量）→ 一键提取 → 叠加图展示 → 结构化数据下载</p>
 </header>
 
 <main>
   <!-- 上传区 -->
   <section class="card" id="upload-card">
-    <h2>① 上传曲线图</h2>
+    <h2>① 上传曲线图（支持多选 / 批量拖拽）</h2>
     <div class="dropzone" id="dropzone">
-      <input type="file" id="file-input" accept=".png,.jpg,.jpeg" hidden>
+      <input type="file" id="file-input" accept=".png,.jpg,.jpeg" multiple hidden>
       <div class="dz-inner" id="dz-inner">
         <div class="dz-icon">📈</div>
-        <p>点击选择 或 拖拽图片到此处</p>
+        <p>点击选择 或 拖拽图片到此处（可一次多张）</p>
         <p class="hint">支持 PNG / JPG，单张 ≤ 20 MB</p>
       </div>
     </div>
-    <div class="preview-row" id="preview-row" hidden>
-      <img id="preview-img" alt="预览">
-      <div class="preview-info">
-        <p id="preview-name"></p>
-        <button class="btn ghost" id="btn-change">重新选择</button>
-      </div>
-    </div>
+    <ul class="file-list" id="file-list" hidden></ul>
 
     <h2>② 提取参数</h2>
     <div class="param-row">
@@ -48,30 +42,22 @@
       </label>
     </div>
 
-    <button class="btn primary big" id="btn-extract" disabled>
-      <span id="btn-label">③ 点击提取</span>
-    </button>
+    <div class="btn-row">
+      <button class="btn primary big grow" id="btn-extract" disabled>
+        <span id="btn-label">③ 批量提取（0 张）</span>
+      </button>
+      <button class="btn ghost" id="btn-clear-files" disabled>清空列表</button>
+    </div>
     <p class="status" id="status"></p>
   </section>
 
   <!-- 结果区 -->
   <section class="card" id="result-card" hidden>
-    <h2>提取结果</h2>
-    <div class="result-grid">
-      <figure>
-        <img id="overlay-img" alt="overlay 叠加图">
-        <figcaption>overlay 叠加图（红色/彩色曲线为提取结果）</figcaption>
-      </figure>
-      <div class="result-side">
-        <table class="summary" id="summary-table"></table>
-        <div class="downloads">
-          <a class="btn primary" id="dl-csv" download>⬇ 下载 CSV 数据</a>
-          <a class="btn primary" id="dl-json" download>⬇ 下载 JSON 数据</a>
-          <a class="btn primary" id="dl-overlay" download>⬇ 下载叠加图</a>
-        </div>
-      </div>
+    <div class="result-head">
+      <h2>提取结果</h2>
+      <button class="btn ghost" id="btn-clear-results">清空结果</button>
     </div>
-    <p class="warnings" id="warnings"></p>
+    <div id="results"></div>
   </section>
 
   <!-- 示例图 -->
