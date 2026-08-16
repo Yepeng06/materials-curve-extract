@@ -124,7 +124,7 @@ PlotQA）；坐标定标社区实践 = 轴端点/刻度锚点校准（WebPlotDig
 - 失败样例 **fail_001 恢复**（0 readable ticks → 1134 pts，x/y 全刻度读出，quality>0.9999）；
 - stub 双路径**精确回退到基线**（合成 med 0.404%/87.5%；平台 med 0.204%/100% 达标）；
 - paddle 平台 100 张：**硬失败 2→0；达标率 24.5%→48%（目标 90% 未达）；med 0.43%→0.14%；
-  刻度识别率 x 97.0% / y 96.3%（核心目标达成）**；
+  刻度识别率 x 97.2% / y 96.3%（核心目标达成）**；
 - 新增指标：scripts/eval_axis_stats.py（刻度识别率/坐标类型准确率，读 report.csv）；
   evaluate.py 增加 n_ticks_x/y_gt、n_ticks_x/y_read 列（向后兼容）。
 
