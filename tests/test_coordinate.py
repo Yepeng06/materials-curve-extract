@@ -214,9 +214,14 @@ def test_pixel_uniform_dense_ticks_abstain():
 def test_judge_abstains_on_two_ticks():
     from mci.pipeline.axis_kind import judge_axis_kind
 
+    # power-of-ten pair with a power-of-ten ratio -> log (B-3 rule)
     ticks = _ticks_x_text([0, 100], ["0.1", "10"])
     kind, _ = judge_axis_kind(ticks)
-    assert kind is None  # 2 ticks give no sequence/spacing evidence
+    assert kind is AxisKind.LOG
+    # non power-of-ten pair -> abstain (R^2 fallback decides)
+    ticks = _ticks_x_text([0, 100], ["1.3", "7.9"])
+    kind, _ = judge_axis_kind(ticks)
+    assert kind is None
 
 
 def test_judge_hint_prior_wins():

@@ -168,6 +168,23 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     sign = 1 if role is AxisRole.X else -1
     p = sign * p_raw
 
+    # ---- single-outlier rejection for 3 ticks ----
+    # 3 valued ticks with one misread defeat the sequence vote (any 2 of 3
+    # fit perfectly); when the 3-value sequence is inconsistent, drop the
+    # tick whose removal leaves a near-perfect progression.
+    if len(v) == 3:
+        from .axis_kind import _seq_scores
+
+        s3 = _seq_scores(v.tolist())
+        if s3 is not None and min(s3) > 0.1:
+            for drop in range(3):
+                v2_ = np.delete(v, drop)
+                p2_ = np.delete(p, drop)
+                s2 = _seq_scores(v2_.tolist())
+                if s2 is not None and min(s2) < 0.05:
+                    p, v = p2_, v2_
+                    break
+
     # ---- multi-signal kind judgement (B-3) ----
     judged, evidence = judge_axis_kind(ticks, kind_hint)
 

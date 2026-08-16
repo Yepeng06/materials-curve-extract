@@ -71,7 +71,16 @@ def resolve_values(ticks: List[Tick]) -> Tuple[List[Optional[float]], bool]:
 
     base_f = [v for v in base if v is not None]
     alt_f = [v for v in alt if v is not None]
-    if alt_f == base_f or len(base_f) < 3:
+    if alt_f == base_f or len(base_f) < 2:
+        return base, False
+
+    if len(base_f) == 2:
+        # 2 ticks: accept the re-resolution when it produces a
+        # power-of-ten pair (e.g. '101' -> 10^1 -> [10, 0.1]) while the
+        # raw values are not one
+        if (_value_sequence_vote(alt_f) is AxisKind.LOG
+                and _value_sequence_vote(base_f) is not AxisKind.LOG):
+            return alt, True
         return base, False
 
     s0 = _seq_scores(base_f)
@@ -89,6 +98,20 @@ def resolve_values(ticks: List[Tick]) -> Tuple[List[Optional[float]], bool]:
 
 def _value_sequence_vote(vals: List[float]) -> Optional[AxisKind]:
     """Vote from value-sequence consistency (None = abstain)."""
+    if len(vals) == 2:
+        # 2 ticks: any model interpolates perfectly, but a pair of power-of-ten
+        # values with a power-of-ten ratio (10^n, n>=1) is a strong log signal
+        # (matplotlib log axes label decades as 10^k; linear axes almost never
+        # pick such a pair).  [1, 10] on a linear axis is the rare false case.
+        v1, v2 = sorted(float(x) for x in vals)
+        if v1 > 0 and v2 > 0:
+            r = v2 / v1
+            lr = float(np.log10(r))
+            if abs(lr - round(lr)) < 1e-6 and abs(lr) >= 1.0:
+                l1, l2 = float(np.log10(v1)), float(np.log10(v2))
+                if abs(l1 - round(l1)) < 1e-4 and abs(l2 - round(l2)) < 1e-4:
+                    return AxisKind.LOG
+        return None
     s = _seq_scores(vals)
     if s is None:
         return None
