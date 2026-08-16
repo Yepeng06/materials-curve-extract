@@ -2,7 +2,7 @@
 
 > AI 你好，这是项目阶段性交接文件。**你必须全文阅读后再开始工作。**
 > 本文件可修改（不同于上级 Prompt.md）。
-> 交接日期：2026-08-16（Phase A 完成 + Web 演示上线 + 坐标文字鲁棒性调研完成 + **Phase B-1 tick 读取加固完成**）
+> 交接日期：2026-08-16（Phase A + Web 演示 + B-1 tick 读取加固 + **B-2 标题/单位识别完成 + B-3 坐标判别三信号 + B-4 YOLO 训练中**）
 
 ## 〇、先读这些（每次会话开始必读）
 
@@ -142,8 +142,38 @@ PlotQA）；坐标定标社区实践 = 轴端点/刻度锚点校准（WebPlotDig
 
 ## 四、下一步计划（按优先级，每步先调研后动手、先请示用户再执行）
 
-### Phase B-1：tick 读取加固（✅ 已完成 2026-08-16，见 §3.6；接口不变，pytest 77/77，
-stub 双路径精确回退基线；paddle 达标率 24.5%→48%，剩余差距属 B-3 坐标判别）
+### Phase B-1：tick 读取加固（✅ 已完成 2026-08-16，见 §3.6；接口不变，pytest 89/89，
+stub 双路径精确回退基线；paddle 达标率 24.5%→48%）
+
+### Phase B-2：标题/轴标题/单位识别（✅ 已完成 2026-08-16，pytest 89/89）
+- title_reader.py：区域+内容规则角色分类（title/x_label/y_label）；variable+unit
+  提取（'Name (unit)' / 'Name / unit'）；log/ln 先验 → fit_axis kind_hint（B-3 信号 3）
+- **竖排 y 轴标题旋转识别**（CW 旋转 90° 条带 + 2x OCR）——matplotlib +90° 旋转实测
+  必须顺时针（CCW 读出碎片）
+- extractor 接入：result.meta['titles'] 结构化输出；log_hint 传 build_axes
+- dataset_builder：meta.json 新增 title/x_label/x_unit/y_label/y_unit GT 字段
+- **验证（30 张平台集，paddle）：title/x_label/y_label 检出率 100%，variable/unit
+  解析率 100%（目标 ≥90% 达成）**；验证脚本 scripts/eval_titles_batch.py +
+  scripts/eval_title_stats.py
+
+### Phase B-3：坐标类型判别三信号融合（实施中，2026-08-16）
+- axis_kind.py：三信号投票 —— ① 值序列一致性（等差/等比，含 **'10N' 上标粘连
+  重解析**：matplotlib log 标签 '10²' 被 OCR 读成 '102' → 重读为 10^N，修复
+  paddle x log 轴 36/37 全判错的头号根因）；② 像素间距（次刻度密度，限有值范围、
+  去重、单一间距 abstain）；③ 外部先验（B-2 log_hint，权重 2）
+- R² 双拟合降级为 fallback + 质量分；RANSAC 在判定空间剔除
+- 修复过程中发现并解决：resolve_values 长度错位（无值 tick）、重复刻度污染
+  值序列（<3px 去重取高 score）
+- **pytest 89/89（新增 B-3/B-2 测试 11 项）**；stub 双路径精确回退基线、轴类型
+  100%；paddle 平台重评估进行中（med 0.14%→0.08%，达标率待最终数字）
+
+### Phase B-4：YOLOv8-nano 结构检测（实施中，2026-08-16）
+- train/train_detection.py 已创建（交接文件提及但原不存在）；数据 2000 张
+  （6 类：plot_area/x_axis_line/y_axis_line/tick_label/legend_box/axis_title）
+- 小批量 smoke 训练（500 张 40 epochs）后台运行中；后续接入 ChartStructure 输出
+  + 文本区域精确定位
+
+
 1. **整图 OCR 兜底**（✅ 已实施）：条带 OCR 为空 → 整图 OCR + 宽松几何过滤
    （失败样例整图 OCR 全对，此改动可救活该类图）；
 2. **轴线检测鲁棒化**（chart_structure.py）：y 轴线不用"全局最左列"，改为
