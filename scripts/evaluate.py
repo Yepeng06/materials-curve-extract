@@ -46,6 +46,9 @@ def main() -> int:
     ap.add_argument("--unet-size", type=int, default=None,
                     help="U-Net inference resolution (must match training; "
                          "default: config unet_size=256)")
+    ap.add_argument("--structure-backend", default=None,
+                    choices=[None, "cv", "yolo"],
+                    help="chart structure detector backend (default: config)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--save-debug", action="store_true")
     args = ap.parse_args()
@@ -64,8 +67,12 @@ def main() -> int:
     os.makedirs(args.out_dir, exist_ok=True)
     debug_dir = os.path.join(args.out_dir, "debug") if args.save_debug else None
     cfg_override = None
-    if args.unet_size:
-        cfg_override = {"unet_size": args.unet_size}
+    if args.unet_size or args.structure_backend:
+        cfg_override = {}
+        if args.unet_size:
+            cfg_override["unet_size"] = args.unet_size
+        if args.structure_backend:
+            cfg_override["structure_backend"] = args.structure_backend
     extractor = Extractor(config_path=args.config, ocr_backend=args.ocr,
                           segmenter=args.segmenter, debug_dir=debug_dir,
                           config_override=cfg_override)

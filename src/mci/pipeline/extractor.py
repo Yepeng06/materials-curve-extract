@@ -18,6 +18,7 @@ from ..schema import ExtractionResult, ExtractionError
 from ..utils import read_image
 from .base import TextBox
 from .chart_structure import detect_structure
+from .detector import YoloStructureDetector
 from .coordinate_mapper import build_axes
 from .curve_extractor import extract_curves
 from .legend_matcher import match_legends
@@ -41,6 +42,8 @@ DEFAULTS = {
     "segmenter": "cv",  # cv | unet
     "unet_checkpoint": "models/checkpoints/unet_curve.pt",
     "unet_size": 256,  # inference resolution (must match training resolution)
+    "structure_backend": "cv",  # cv | yolo (Phase B-4)
+    "yolo_weights": "runs/detect/runs/detect/mci_struct_full/weights/best.pt",
     "debug": False,
 }
 
@@ -86,6 +89,7 @@ class Extractor:
         if self.debug_dir:
             os.makedirs(self.debug_dir, exist_ok=True)
         self._segmenter = None
+        self._structure_detector = None
 
     def _get_segmenter(self):
         if self._segmenter is None and self.cfg.get("segmenter") == "unet":
@@ -108,7 +112,16 @@ class Extractor:
 
         # 1. structure
         t = time.time()
-        structure = detect_structure(image, self.cfg)
+        if self.cfg.get("structure_backend") == "yolo":
+            if self._structure_detector is None:
+                from .detector import YoloStructureDetector
+
+                self._structure_detector = YoloStructureDetector(
+                    self.cfg.get("yolo_weights", ""),
+                )
+            structure = self._structure_detector.detect(image)
+        else:
+            structure = detect_structure(image, self.cfg)
         timings["structure"] = time.time() - t
 
         # 2. ticks

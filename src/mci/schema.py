@@ -125,6 +125,7 @@ class ChartStructure:
     y_axis_pixel: int  # image column of the left (y) axis line
     x_ticks_px: List[float] = field(default_factory=list)  # sorted, ascending
     y_ticks_px: List[float] = field(default_factory=list)  # sorted, ascending
+    meta: dict = field(default_factory=dict)  # detector-specific extras
 
     @property
     def width(self) -> int:
