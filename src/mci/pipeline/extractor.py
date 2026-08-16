@@ -43,7 +43,7 @@ DEFAULTS = {
     "unet_checkpoint": "models/checkpoints/unet_curve.pt",
     "unet_size": 256,  # inference resolution (must match training resolution)
     "structure_backend": "cv",  # cv | yolo (Phase B-4)
-    "yolo_weights": "runs/detect/runs/detect/mci_struct_full/weights/best.pt",
+    "yolo_weights": "models/detection/yolo_struct.pt",
     "debug": False,
 }
 
