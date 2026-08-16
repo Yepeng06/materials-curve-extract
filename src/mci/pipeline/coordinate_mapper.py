@@ -143,8 +143,19 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     chosen mapping and serves as the fallback when the judge abstains.
     """
     values, _reread = resolve_values(ticks)
-    valued = [(t.pixel, v) for t, v in zip(ticks, values)]
-    valued = [(p, v) for (p, v) in valued if v is not None]
+    valued = [(t.pixel, v, t.score) for t, v in zip(ticks, values) if v is not None]
+    # de-duplicate near-coincident ticks (<3 px apart: real OCR can emit two
+    # boxes for one label, e.g. '200' and '0' on the same spot -- the extra
+    # value pollutes the sequence checks); keep the higher-scoring one
+    valued.sort(key=lambda x: x[0])
+    deduped = []
+    for p, v, s in valued:
+        if deduped and abs(p - deduped[-1][0]) < 3.0:
+            if s > deduped[-1][2]:
+                deduped[-1] = (p, v, s)
+        else:
+            deduped.append((p, v, s))
+    valued = [(p, v) for p, v, _ in deduped]
     if len(valued) < min_ticks:
         raise AxisFitError(
             f"{role.value}-axis: only {len(valued)} readable ticks "

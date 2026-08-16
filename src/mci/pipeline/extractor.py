@@ -22,6 +22,7 @@ from .coordinate_mapper import build_axes
 from .curve_extractor import extract_curves
 from .legend_matcher import match_legends
 from .tick_reader import PaddleOCRBackend, StubOCRBackend, read_ticks
+from .title_reader import read_rotated_y_title, read_titles
 
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -130,14 +131,34 @@ class Extractor:
         # endpoint pixels (x: axis line left/right; y: plot top/bottom) feed
         # the 0-start endpoint anchor in fit_axis
         x0, y0, x1, y1 = structure.plot_bbox
+        # Phase B-2: whole-image text gives title / axis labels / units and
+        # a log prior for the kind judgement (only when OCR provides boxes;
+        # stub sidecars carry tick labels only, so titles stay empty there)
+        titles: dict = {}
+        try:
+            title_boxes = ocr.read_text_boxes(image)
+            titles = read_titles(title_boxes, structure)
+            # vertical y-axis titles need a rotated OCR pass; use it when
+            # the horizontal pass missed the label or parsed no unit
+            yl = titles.get("y_label")
+            if yl is None or not yl.get("unit") or not yl.get("variable"):
+                rot = read_rotated_y_title(image, structure, ocr)
+                if rot and rot.get("text"):
+                    titles["y_label"] = rot
+        except Exception:
+            titles = {}
+        x_hint = titles.get("x_label", {}).get("log_hint", "") or self.cfg.get("x_kind_hint", "auto")
+        y_hint = titles.get("y_label", {}).get("log_hint", "") or self.cfg.get("y_kind_hint", "auto")
         x_axis, y_axis = build_axes(
             x_ticks, y_ticks,
-            self.cfg.get("x_kind_hint", "auto"),
-            self.cfg.get("y_kind_hint", "auto"),
+            x_hint,
+            y_hint,
             x_endpoints=(float(structure.y_axis_pixel), float(x1)),
             y_endpoints=(float(y0), float(structure.x_axis_pixel)),
         )
         timings["axes"] = time.time() - t
+        meta_titles = {k: {kk: vv for kk, vv in v.items() if kk != "center"}
+                       for k, v in titles.items()}
         if x_axis.quality < 0.99:
             warnings.append(f"x-axis fit quality R^2={x_axis.quality:.4f}")
         if y_axis.quality < 0.99:
@@ -155,7 +176,8 @@ class Extractor:
         timings["legend"] = time.time() - t
 
         timings["total"] = time.time() - t0
-        meta = {"timings": timings, "ocr_backend": type(ocr).__name__}
+        meta = {"timings": timings, "ocr_backend": type(ocr).__name__,
+                "titles": meta_titles}
 
         result = ExtractionResult(
             image_path=image_path,
