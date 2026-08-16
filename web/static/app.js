@@ -143,6 +143,12 @@ function renderResultCard(data) {
         <tr><td>图像尺寸</td><td>${data.image_size[0]} × ${data.image_size[1]} px</td></tr>
         <tr><td>曲线</td><td>${data.n_curves} 条（${curves}）</td></tr>
         <tr><td>坐标类型</td><td>x: ${data.x_axis} · y: ${data.y_axis}</td></tr>
+        ${data.titles && (data.titles.title || data.titles.x_label || data.titles.y_label) ? `
+        <tr><td>标题/轴标题</td><td>
+          ${data.titles.title ? `标题: ${data.titles.title.text} ` : ''}
+          ${data.titles.x_label ? `X: ${data.titles.x_label.text} ` : ''}
+          ${data.titles.y_label ? `Y: ${data.titles.y_label.text}` : ''}
+        </td></tr>` : ''}
         <tr><td>提取耗时</td><td>${data.elapsed_s}s</td></tr>
         <tr><td>OCR 后端</td><td>${data.ocr === "paddle" ? "真实识别（PaddleOCR）" : "标准答案（stub）"}</td></tr>
         <tr><td>分割模型</td><td>${data.segmenter === "unet" ? "深度学习 U-Net" : "经典 CV"}</td></tr>

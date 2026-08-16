@@ -215,6 +215,8 @@ def _run_extraction(image_path: str, ocr: str, segmenter: str,
         "curves": curves,
         "x_axis": result.x_axis.kind.value,
         "y_axis": result.y_axis.kind.value,
+        "titles": {k: {kk: vv for kk, vv in v.items() if kk != "center"}
+                   for k, v in result.meta.get("titles", {}).items()},
         "warnings": list(result.warnings) + ocr_warnings,
         "elapsed_s": round(elapsed, 2),
         "timings": {k: round(v, 3) for k, v in timings.items()},
