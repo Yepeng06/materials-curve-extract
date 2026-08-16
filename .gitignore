@@ -1,12 +1,15 @@
 # runtime outputs
 data/*
 web/runs/
+web/*.log
 *.png
 *.jpg
 *.jpeg
 !data/.gitkeep
 !data/*.py
-!web/examples/
+!web/examples/*.png
+!web/examples/*.jpg
+!web/examples/*.jpeg
 
 # python
 __pycache__/
