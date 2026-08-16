@@ -168,12 +168,29 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     sign = 1 if role is AxisRole.X else -1
     p = sign * p_raw
 
+    # ---- pre-RANSAC outlier rejection BEFORE the kind judgement ----
+    # a misread tick (e.g. "2" in a 0.0..0.7 axis) would otherwise
+    # poison the value-sequence vote; run RANSAC in both spaces, keep the
+    # space with more inliers, and blank the dropped ticks for the judge
+    drop_px = set()
+    if len(v) >= 4:
+        inl_lin = _ransac_inliers(p, v)
+        inl_log = np.zeros(len(v), dtype=bool)
+        pos = v > 0
+        if int(pos.sum()) >= 4:
+            inl_log[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
+        keep = inl_lin if int(inl_lin.sum()) >= int(inl_log.sum()) else inl_log
+        if 3 <= int(keep.sum()) < len(v):
+            drop_px = {valued[i][0] for i in range(len(valued)) if not keep[i]}
+            p = p[keep]
+            v = v[keep]
+
     # ---- single-outlier rejection for 3 ticks ----
     # 3 valued ticks with one misread defeat the sequence vote (any 2 of 3
     # fit perfectly); when the 3-value sequence is inconsistent, drop the
     # tick whose removal leaves a near-perfect progression.
     if len(v) == 3:
-        from .axis_kind import _seq_scores
+        from .axis_kind import _seq_scores, _value_sequence_vote
 
         s3 = _seq_scores(v.tolist())
         if s3 is not None and min(s3) > 0.1:
@@ -181,37 +198,22 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
                 v2_ = np.delete(v, drop)
                 p2_ = np.delete(p, drop)
                 s2 = _seq_scores(v2_.tolist())
-                if s2 is not None and min(s2) < 0.05:
+                # accept when the remaining 2 ticks form a near-perfect
+                # progression (>=3 ticks) or a power-of-ten pair (2 ticks)
+                if (s2 is not None and min(s2) < 0.05) or (
+                    s2 is None and _value_sequence_vote(v2_.tolist()) is AxisKind.LOG
+                ):
+                    drop_px.add(valued[drop][0])
                     p, v = p2_, v2_
                     break
 
-    # ---- multi-signal kind judgement (B-3) ----
-    judged, evidence = judge_axis_kind(ticks, kind_hint)
+    # ---- multi-signal kind judgement (B-3) on the cleaned ticks ----
+    from dataclasses import replace
 
-    # ---- RANSAC outlier rejection in the judged space (or both when
-    # the judge abstained); at least 3 ticks are always kept ----
-    if len(v) >= 4:
-        if judged is AxisKind.LOG:
-            pos = v > 0
-            keep = np.ones(len(v), dtype=bool)
-            if int(pos.sum()) >= 4:
-                keep[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
-            keep = keep if int(keep.sum()) >= 3 else np.ones(len(v), dtype=bool)
-        elif judged is AxisKind.LINEAR:
-            keep = _ransac_inliers(p, v)
-        else:
-            inl_lin = _ransac_inliers(p, v)
-            inl_log = np.zeros(len(v), dtype=bool)
-            pos = v > 0
-            if int(pos.sum()) >= 4:
-                inl_log[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
-            keep = inl_lin if int(inl_lin.sum()) >= int(inl_log.sum()) else inl_log
-        if int(keep.sum()) >= 3 and int(keep.sum()) < len(v):
-            p = p[keep]
-            v = v[keep]
-
-    # ---- endpoint anchor: axis starts near 0 (linear, low end) ----
-    p, v, anchored = _fit_with_endpoint_zero(p, v, sign, endpoint_pixels)
+    filtered_ticks = [
+        t if t.pixel not in drop_px else replace(t, value=None) for t in ticks
+    ]
+    judged, evidence = judge_axis_kind(filtered_ticks, kind_hint)
 
     a_lin, b_lin, r2_lin, rms_lin = _fit(p, v)
 

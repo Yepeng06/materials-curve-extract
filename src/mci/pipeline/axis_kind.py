@@ -89,10 +89,15 @@ def resolve_values(ticks: List[Tick]) -> Tuple[List[Optional[float]], bool]:
         return base, False
     best0 = min(s0)
     best1 = min(s1)
-    # accept the re-resolution when it is clearly more consistent and
-    # essentially perfect (relative std < 5%)
-    if best1 < 0.05 and best1 < 0.5 * best0:
-        return alt, True
+    # accept when the re-resolved sequence is near-perfect AND clearly
+    # better: either the raw sequence is not near-perfect at all, or it is
+    # ambiguous (both progressions score ~0, e.g. glued '100/101/102/103'
+    # which is trivially arithmetic AND geometric) while the re-resolved
+    # one is clearly typed (one score far below the other)
+    if best1 < 0.05:
+        if best0 >= 0.05 or (abs(s0[0] - s0[1]) < 0.02
+                             and abs(s1[0] - s1[1]) > 0.1):
+            return alt, True
     return base, False
 
 
