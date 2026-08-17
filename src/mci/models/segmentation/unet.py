@@ -39,9 +39,11 @@ class DoubleConv(nn.Module):
 
 
 class UNet(nn.Module):
-    """2D U-Net, output = single-channel logits (curve probability)."""
+    """2D U-Net.  Output channels: 1 = single curve probability (baseline),
+    K > 1 = per-instance curve channels (Phase C multi-curve)."""
 
-    def __init__(self, in_channels: int = 1, base: int = 64):
+    def __init__(self, in_channels: int = 1, base: int = 64,
+                 out_channels: int = 1):
         super().__init__()
         self.pool = nn.MaxPool2d(2)
         self.enc1 = DoubleConv(in_channels, base)
@@ -54,7 +56,7 @@ class UNet(nn.Module):
         self.dec2 = DoubleConv(base * 4, base * 2)
         self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
         self.dec1 = DoubleConv(base * 2, base)
-        self.out = nn.Conv2d(base, 1, 1)
+        self.out = nn.Conv2d(base, out_channels, 1)
 
     def forward(self, x):
         e1 = self.enc1(x)

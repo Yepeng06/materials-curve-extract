@@ -175,9 +175,14 @@
 - 500 张独立 seed 验收集生成（dataset_builder --num-curves 1 --count 500 --seed <新>）
 - 测试报告整理（全部评估表 + ablation：CV vs YOLO 结构、stub vs paddle、判型各信号）
 
-### 5.5【需训练，先请示】Phase C 后半：多曲线分割
-- **LineFormer 式实例分割**（arXiv:2305.01837）或 U-Net K 通道；数据已就绪
-  （2000 张 2-4 曲线）；组件评分 top-K + 颜色分离；多曲线召回 ≥95% 验收
+### 5.5【需训练，先请示】Phase C 后半：多曲线分割（✅ 首轮完成 2026-08-17，待 512 精调）
+- **已实施**：U-Net K=6 通道实例分割（train/train_segmentation_multi.py）；实例掩码 =
+  curves_px 折线（灰度聚类已否决：虚线/抗锯齿灰度混乱）；推理 extract_curves_multi +
+  eval_multi.py（召回/逐曲线 RMSE/曲线数）；extractor 已支持 --segmenter multi_unet
+- **结果**：曲线数准确率 93%（168/180），召回 33.7%——精度瓶颈 = 256 分辨率
+  （3.3px 偏差 → rel 1-2%）；单曲线 512 模型对照 val_single 100% 证实 512 训练可解
+- **下一步（待用户批准）**：512 微调（v3→512，10 epoch，~10h 后台过夜）→ 预期召回 ≥90%；
+  训练命令见 C_DESIGN.md
 
 ### 5.6【需训练，先请示】其他训练类
 - B-4 增强：x_axis_line 检测弱（mAP50 0.749）→ 更大 imgsz/更长训练/标签细化

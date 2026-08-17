@@ -541,3 +541,71 @@ def extract_curves(
         legend_label=None,
     )
     return [curve]
+
+def extract_curves_multi(
+    image_bgr: np.ndarray,
+    structure: ChartStructure,
+    x_axis: AxisSpec,
+    y_axis: AxisSpec,
+    cfg: Optional[Dict] = None,
+    segmenter: Optional["object"] = None,
+) -> List[Curve]:
+    """Extract ALL curve instances (Phase C).
+
+    ``segmenter`` must expose ``prob_full(image) -> (K, H, W)``
+    (MultiUNetSegmenter).  Each channel is thresholded, fragment-
+    filtered, skeleton-traced and sub-pixel refined exactly like the
+    single-curve U-Net path; empty channels are skipped.  Curves are
+    returned in channel order (left-to-right at training time).
+    """
+    cfg = cfg or {}
+    x0, y0, x1, y1 = structure.plot_bbox
+    plot_w, plot_h = x1 - x0 + 1, y1 - y0 + 1
+    if plot_w < 20 or plot_h < 20:
+        raise CurveExtractionError("plot area too small")
+
+    prob = segmenter.prob_full(image_bgr)  # (K, H, W)
+    if prob.ndim != 3 or prob.shape[0] < 1:
+        raise CurveExtractionError("multi segmenter must return (K,H,W)")
+    crop = image_bgr[y0 : y1 + 1, x0 : x1 + 1]
+    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    # Phase C: overlapping channels (curves crossing/touching) must not
+    # both claim the same pixel -- assign each pixel to the channel with
+    # the highest probability (argmax over the plot region), preventing
+    # the skeleton tracer from switching curves at crossings.
+    reg = prob[:, y0 : y1 + 1, x0 : x1 + 1]  # (K, H, W)
+    curves: List[Curve] = []
+    for c in range(prob.shape[0]):
+        region = reg[c]
+        if float(region.max()) < 0.5:
+            continue
+        amax = np.argmax(reg, axis=0)  # winner channel per pixel
+        mask01 = ((region > 0.5) & (amax == c)).astype(np.uint8)
+        mask01 = _filter_mask_fragments(mask01, plot_w, plot_h)
+        if int(mask01.sum()) < 16:
+            continue
+        skel = skeletonize(mask01.astype(bool)).astype(np.uint8)
+        chain = _trace_chain(skel)
+        if chain is not None:
+            xs = [p[0] for p in chain]
+            if (max(xs) - min(xs) + 1) < 0.7 * plot_w:
+                chain = None
+        if chain is not None:
+            chain = _refine_chain(region, chain)
+        else:
+            chain = _column_centroid(region)
+        if not chain or len(chain) < 8:
+            continue
+        chain = downsample_chain(chain, int(cfg.get("max_points", 2000)))
+        points = [(x_axis.pixel_to_value(x0 + px), y_axis.pixel_to_value(y0 + py))
+                  for px, py in chain]
+        pixel_points = [(x0 + int(round(px)), y0 + int(round(py)))
+                        for px, py in chain]
+        color_px = rgb[mask01 > 0]
+        color = tuple(int(v) for v in np.median(color_px, axis=0)) if len(color_px) else (0, 0, 0)
+        curves.append(Curve(name=f"curve_{c}", points=points,
+                          pixel_points=pixel_points, color=color,
+                          legend_label=None))
+    if not curves:
+        raise CurveExtractionError("no curve instance found in plot region")
+    return curves

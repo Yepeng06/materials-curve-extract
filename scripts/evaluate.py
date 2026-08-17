@@ -41,7 +41,7 @@ def main() -> int:
     ap.add_argument("--out-dir", default="data/eval")
     ap.add_argument("--config", default=None)
     ap.add_argument("--ocr", default="auto", choices=["auto", "paddle", "stub"])
-    ap.add_argument("--segmenter", default=None, choices=[None, "cv", "unet"],
+    ap.add_argument("--segmenter", default=None, choices=[None, "cv", "unet", "multi_unet"],
                     help="curve segmentation backend (default: config value)")
     ap.add_argument("--unet-size", type=int, default=None,
                     help="U-Net inference resolution (must match training; "

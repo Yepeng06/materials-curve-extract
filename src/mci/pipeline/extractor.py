@@ -40,8 +40,9 @@ DEFAULTS = {
     "x_kind_hint": "auto",
     "y_kind_hint": "auto",
     "ocr_backend": "auto",  # auto | paddle | stub
-    "segmenter": "cv",  # cv | unet
+    "segmenter": "cv",  # cv | unet | multi_unet
     "unet_checkpoint": "models/checkpoints/unet_curve.pt",
+    "multi_unet_checkpoint": "models/checkpoints/unet_multi_curve.pt",
     "unet_size": 256,  # inference resolution (must match training resolution)
     "structure_backend": "cv",  # cv | yolo (Phase B-4)
     "yolo_weights": "models/detection/yolo_struct.pt",
@@ -98,6 +99,13 @@ class Extractor:
 
             self._segmenter = UNetSegmenter(
                 self.cfg.get("unet_checkpoint"),
+                size=int(self.cfg.get("unet_size", 256)),
+            )
+        elif self._segmenter is None and self.cfg.get("segmenter") == "multi_unet":
+            from .segmenter import MultiUNetSegmenter
+
+            self._segmenter = MultiUNetSegmenter(
+                self.cfg.get("multi_unet_checkpoint", "models/checkpoints/unet_multi_curve.pt"),
                 size=int(self.cfg.get("unet_size", 256)),
             )
         return self._segmenter
@@ -189,8 +197,14 @@ class Extractor:
 
         # 4. curve extraction (cv heuristics or learned U-Net segmentation)
         t = time.time()
-        curves = extract_curves(image, structure, x_axis, y_axis, self.cfg,
-                                segmenter=self._get_segmenter())
+        if self.cfg.get("segmenter") == "multi_unet":
+            from .curve_extractor import extract_curves_multi
+
+            curves = extract_curves_multi(image, structure, x_axis, y_axis,
+                                          self.cfg, self._get_segmenter())
+        else:
+            curves = extract_curves(image, structure, x_axis, y_axis, self.cfg,
+                                    segmenter=self._get_segmenter())
         timings["curve"] = time.time() - t
 
         # 5. legend matching (baseline no-op)
