@@ -10,6 +10,7 @@ axis_frac_threshold: 0.45   # ink fraction needed to accept an axis row/column
 # ---- tick reading / OCR ----
 ocr_backend: auto           # auto | paddle | stub (stub reads *_labels.json sidecar)
 tick_assoc_tol_px: 25        # label<->mark pairing tolerance (px)
+tick_min_score: 0.55         # B-5a: drop OCR boxes below this rec score (fragments)
 x_kind_hint: auto           # auto | linear | log  (coordinate type judgement)
 y_kind_hint: auto
 

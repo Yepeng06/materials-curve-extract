@@ -138,6 +138,7 @@ def _associate(
     labels: List[TextBox],
     axis: str,  # "x" | "y"
     tol: float,
+    drop_unmatched: bool = False,
 ) -> List[Tick]:
     """Globally assign labels to tick marks by nearest distance.
 
@@ -145,6 +146,13 @@ def _associate(
     ascending distance order, so a tick cannot steal a label that matches a
     later tick much better (a failure mode of naive per-tick greedy search
     when minor ticks are dense).
+
+    ``drop_unmatched`` (B-5a): when the axis has plenty of detected tick
+    marks (>= 4), a label that matches NO mark is almost certainly stray
+    axis-title/legend text ('10' fragments of a y-axis title like
+    'Creep strain (10...' -- img_0013 regression) and must NOT become a
+    fallback tick, whose stray pixel poisons both the value sequence and
+    the pixel-spacing vote.
     """
     axis_i = 0 if axis == "x" else 1
     pairs = []
@@ -173,18 +181,82 @@ def _associate(
                               text=lb.text, score=lb.score))
         else:
             ticks.append(Tick(pixel=p, value=None, text="", score=0.0))
-    for j, lb in enumerate(labels):
-        if j not in used_labels:
-            ticks.append(
-                Tick(
-                    pixel=float(lb.center[axis_i]),
-                    value=parse_number_text(lb.text),
-                    text=lb.text,
-                    score=lb.score,
+    # drop_unmatched only when the marks are trustworthy (>= 2 labels
+    # actually matched): if nearly nothing matched, the tick marks were
+    # misdetected and the label centres must carry the axis (fail_001 /
+    # img_0008 scenario -- strict mode would throw every real label away).
+    if not drop_unmatched or len(used_labels) < 2:
+        for j, lb in enumerate(labels):
+            if j not in used_labels:
+                ticks.append(
+                    Tick(
+                        pixel=float(lb.center[axis_i]),
+                        value=parse_number_text(lb.text),
+                        text=lb.text,
+                        score=lb.score,
+                    )
                 )
-            )
     ticks.sort(key=lambda t: t.pixel)
     return ticks
+
+
+def _dedupe_ticks(ticks: List[Tick], tol: float = 10.0) -> List[Tick]:
+    """Collapse near-coincident ticks (< ``tol`` px) to one.
+
+    B-5a: PP-OCRv4 can emit two boxes for ONE label (e.g. '10-1' and '0-1'
+    5 px apart at the same 10^-2 tick -- img_0051), which then pollutes the
+    value-sequence disambiguation and the RANSAC pre-fit with a duplicate.
+    Keeps the tick that has a value (else the higher score).
+    """
+    out: List[Tick] = []
+    for t in sorted(ticks, key=lambda t: t.pixel):
+        if out and abs(t.pixel - out[-1].pixel) < tol:
+            o = out[-1]
+            if (t.value is not None and o.value is None) or (
+                t.value is not None and o.value is not None and t.score > o.score
+            ) or (t.value is None and o.value is None and t.score > o.score):
+                out[-1] = t
+        else:
+            out.append(t)
+    return out
+
+
+def _strip_crop(image_bgr: np.ndarray, structure: ChartStructure,
+                axis: str) -> Tuple[np.ndarray, int, int]:
+    """Crop the x- or y-axis label strip; returns (crop, offset_x, offset_y).
+
+    y-strip width must NOT depend on y_axis_col (a misdetected axis column
+    collapses it to a few px — the fail_001 root cause); use a generous
+    left band of the image instead.
+    """
+    h, w = image_bgr.shape[:2]
+    x0, y0, _, _ = structure.plot_bbox
+    x_axis_row = structure.x_axis_pixel
+    y_axis_col = structure.y_axis_pixel
+    if axis == "x":
+        strip_h = min(h - x_axis_row - 1, max(80, h // 8))
+        crop = image_bgr[x_axis_row - 6 : x_axis_row + strip_h,
+                         max(0, y_axis_col - 10) :, :]
+        return crop, max(0, y_axis_col - 10), x_axis_row - 6
+    strip_w = min(w, max(40, int(w * 0.30)))
+    crop = image_bgr[max(0, y0 - 20) : min(h, x_axis_row + 20), :strip_w, :]
+    return crop, 0, max(0, y0 - 20)
+
+
+def _ocr_strip_scaled(image_bgr: np.ndarray, structure: ChartStructure,
+                      ocr: "object", axis: str, scale: int) -> List[TextBox]:
+    """OCR one axis strip at a scale; boxes in full-image coordinates."""
+    crop, ox, oy = _strip_crop(image_bgr, structure, axis)
+    if crop.size == 0:
+        return []
+    up = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    boxes: List[TextBox] = []
+    for b in ocr.read_text_boxes(up):
+        box = b.box / scale
+        box[:, 0] += ox
+        box[:, 1] += oy
+        boxes.append(TextBox(box=box, text=b.text, score=b.score))
+    return boxes
 
 
 def _ocr_strips(image_bgr: np.ndarray, structure: ChartStructure, ocr: "object",
@@ -196,32 +268,9 @@ def _ocr_strips(image_bgr: np.ndarray, structure: ChartStructure, ocr: "object",
     """
     if not getattr(ocr, "strip_crops", False):
         return ocr.read_text_boxes(image_bgr)
-    h, w = image_bgr.shape[:2]
-    x0, y0, x1, y1 = structure.plot_bbox
-    x_axis_row = structure.x_axis_pixel
-    y_axis_col = structure.y_axis_pixel
-    strip_h = min(h - x_axis_row - 1, max(80, h // 8))
-    x_strip = image_bgr[x_axis_row - 6 : x_axis_row + strip_h, max(0, y_axis_col - 10) :, :]
-    # y-label strip width must NOT depend on y_axis_col (a misdetected axis
-    # column collapses it to a few px — the fail_001 root cause); use a
-    # generous left band of the image instead.
-    strip_w = min(w, max(40, int(w * 0.30)))
-    y_strip = image_bgr[max(0, y0 - 20) : min(h, x_axis_row + 20), :strip_w, :]
-
-    scale = 2
     boxes: List[TextBox] = []
-    for strip, ox, oy in (
-        (x_strip, max(0, y_axis_col - 10), x_axis_row - 6),
-        (y_strip, 0, max(0, y0 - 20)),
-    ):
-        if strip.size == 0:
-            continue
-        up = cv2.resize(strip, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        for b in ocr.read_text_boxes(up):
-            box = b.box / scale
-            box[:, 0] += ox
-            box[:, 1] += oy
-            boxes.append(TextBox(box=box, text=b.text, score=b.score))
+    for axis in ("x", "y"):
+        boxes.extend(_ocr_strip_scaled(image_bgr, structure, ocr, axis, 2))
     return boxes
 
 
@@ -271,6 +320,27 @@ def _classify_labels(
     return x_labels, y_labels
 
 
+def _is_tick_label(b: TextBox, min_score: float) -> bool:
+    """Keep an OCR box as a tick-label candidate.
+
+    B-5a filters:
+      * rec score below ``min_score`` -- single-glyph fragments ('1'@0.1,
+        '0'@0.5) that pollute the value sequence;
+      * long non-numeric text -- axis titles ('Creep strain (%)' fragments
+        like '( s da') and legend strings are never tick labels, and their
+        stray positions poison the pixel-spacing vote (img_0061 regression).
+    """
+    if b.score < min_score:
+        return False
+    t = b.text.strip()
+    if not t:
+        return False
+    digits = sum(c.isdigit() for c in t)
+    letters = sum(c.isalpha() for c in t)
+    if letters >= 2 and digits == 0:
+        return False
+    return True
+
 def read_ticks(
     image_bgr: np.ndarray,
     structure: ChartStructure,
@@ -286,15 +356,25 @@ def read_ticks(
     """
     cfg = cfg or {}
     tol = float(cfg.get("tick_assoc_tol_px", 80))
+    min_score = float(cfg.get("tick_min_score", 0.55))
     can_strip = bool(getattr(ocr, "strip_crops", False))
-    boxes = _ocr_strips(image_bgr, structure, ocr, cfg)
+    # B-5a: drop low-confidence OCR boxes before association -- PP-OCRv4
+    # emits single-glyph fragments ('1'@0.1, '0'@0.5, '6'@0.4) that would
+    # otherwise pollute the value sequence with fake ticks.  Genuine tick
+    # labels score >= 0.85 on the platform set (lowest observed 0.71).
+    boxes = [b for b in _ocr_strips(image_bgr, structure, ocr, cfg)
+             if _is_tick_label(b, min_score)]
 
     x_ticks: List[Tick] = []
     y_ticks: List[Tick] = []
-    for attempt in (0, 1):
+    # B-5a: when an axis has >= 4 detected tick marks, labels that match
+    # no mark are stray title/legend text and are dropped (no fallback tick)
+    strict_x = len(structure.x_ticks_px) >= 4
+    strict_y = len(structure.y_ticks_px) >= 4
+    for attempt in (0, 1, 2):
         x_labels, y_labels = _classify_labels(boxes, structure)
-        x_ticks = _associate(structure.x_ticks_px, x_labels, "x", tol)
-        y_ticks = _associate(structure.y_ticks_px, y_labels, "y", tol)
+        x_ticks = _associate(structure.x_ticks_px, x_labels, "x", tol, strict_x)
+        y_ticks = _associate(structure.y_ticks_px, y_labels, "y", tol, strict_y)
         nv_x = sum(1 for t in x_ticks if t.value is not None)
         nv_y = sum(1 for t in y_ticks if t.value is not None)
 
@@ -309,7 +389,24 @@ def read_ticks(
         ):
             break
         if attempt == 0:
-            boxes = _merge_boxes(boxes, ocr.read_text_boxes(image_bgr))
+            full = [b for b in ocr.read_text_boxes(image_bgr)
+                    if _is_tick_label(b, min_score)]
+            boxes = _merge_boxes(boxes, full)
+        elif attempt == 1:
+            # B-5a: high-resolution (4x) strip re-OCR -- the 10^N
+            # superscript family ('10', '100', '10-', '012'...) mostly
+            # resolves at 4x, and labels missed at 2x get detected.  Only
+            # run for axes that are still short on valued ticks.
+            for axis, tks, marks in (
+                ("x", x_ticks, structure.x_ticks_px),
+                ("y", y_ticks, structure.y_ticks_px),
+            ):
+                nv = sum(1 for t in tks if t.value is not None)
+                if not _enough(nv, marks):
+                    hi = [b for b in _ocr_strip_scaled(
+                        image_bgr, structure, ocr, axis, 4)
+                        if _is_tick_label(b, min_score)]
+                    boxes = _merge_boxes(boxes, hi)
     if not boxes:
         raise TickReadingError("OCR returned no text boxes")
-    return x_ticks, y_ticks
+    return _dedupe_ticks(x_ticks), _dedupe_ticks(y_ticks)

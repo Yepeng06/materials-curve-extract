@@ -188,12 +188,16 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     # ---- single-outlier rejection for 3 ticks ----
     # 3 valued ticks with one misread defeat the sequence vote (any 2 of 3
     # fit perfectly); when the 3-value sequence is inconsistent, drop the
-    # tick whose removal leaves a near-perfect progression.
+    # tick whose removal leaves a near-perfect progression.  The
+    # inconsistency test is PIXEL-AWARE (_seq_score_of, B-5a): a log axis
+    # with one tick missed by OCR (e.g. 10,1,0.01 over equally spaced
+    # pixels) is NOT inconsistent -- its px-per-decade is constant -- and
+    # must not be pruned into a 2-tick fit (img_0056 regression).
     if len(v) == 3:
-        from .axis_kind import _seq_scores, _value_sequence_vote
+        from .axis_kind import _seq_score_of, _seq_scores, _value_sequence_vote
 
-        s3 = _seq_scores(v.tolist())
-        if s3 is not None and min(s3) > 0.1:
+        s3 = _seq_score_of(v.tolist(), p_raw.tolist())
+        if s3 > 0.1:
             for drop in range(3):
                 v2_ = np.delete(v, drop)
                 p2_ = np.delete(p, drop)
@@ -245,6 +249,48 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
                 kind = AxisKind.LOG
 
     if kind is AxisKind.LOG and ok_log:
+        # ---- B-5a: fill missing log ticks ----------------
+        # A log axis whose OCR missed a tick fits worse (per-decade px
+        # inconsistent, 1-4% RMSE on the platform set).  Fill decade-2
+        # gaps from the geometry (missing middle tick) and extrapolate
+        # the low/high end by one decade ONLY when the plot edge
+        # supports the inferred position.  Conservative: >= 3 valued
+        # ticks, positive values, gap within [1.7, 2.3] decades.
+        v_pos = v > 0
+        if len(v) >= 3 and int(v_pos.sum()) >= 3:
+            pv = np.column_stack([p[v_pos], np.log10(v[v_pos])])
+            pv = pv[np.argsort(pv[:, 0])]
+            d_p = np.diff(pv[:, 0])
+            d_l = np.diff(pv[:, 1])
+            ok = np.abs(d_l) > 1e-9
+            if int(ok.sum()) >= 1:
+                d_deg = float(np.median(d_p[ok] / np.abs(d_l[ok])))
+                add_p: List[float] = []
+                add_l: List[float] = []
+                for i in range(len(pv) - 1):
+                    g = abs(pv[i + 1, 1] - pv[i, 1])
+                    if 1.7 <= g <= 2.3:
+                        for k in range(1, int(round(g))):
+                            f = k / g
+                            add_p.append(pv[i, 0] + d_p[i] * f)
+                            add_l.append(pv[i, 1] + d_l[i] * f)
+                if endpoint_pixels is not None:
+                    e0, e1 = sorted(float(x) for x in endpoint_pixels)
+                    p_lo = min(e0 * sign, e1 * sign)
+                    p_hi = max(e0 * sign, e1 * sign)
+                    t = 0.3 * d_deg
+                    if p_lo - t < pv[0, 0] - d_deg < p_lo + t:
+                        add_p.append(pv[0, 0] - d_deg)
+                        add_l.append(pv[0, 1] - 1.0)
+                    if p_hi - t < pv[-1, 0] + d_deg < p_hi + t:
+                        add_p.append(pv[-1, 0] + d_deg)
+                        add_l.append(pv[-1, 1] + 1.0)
+                if add_p:
+                    p = np.concatenate([p, np.asarray(add_p, dtype=np.float64)])
+                    v = np.concatenate([v, 10.0 ** np.asarray(add_l)])
+                    o = np.argsort(p)
+                    p, v = p[o], v[o]
+                    a_log, b_log, r2_log, rms_log = _fit(p[v > 0], np.log10(v[v > 0]))
         slope, intercept, quality = a_log, b_log, r2_log
     else:
         kind = AxisKind.LINEAR

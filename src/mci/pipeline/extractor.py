@@ -34,6 +34,7 @@ DEFAULT_CONFIG_PATH = os.path.join(
 DEFAULTS = {
     "axis_frac_threshold": 0.45,
     "tick_assoc_tol_px": 25,  # label<->mark pairing tolerance
+    "tick_min_score": 0.55,  # B-5a: drop OCR boxes below this rec score
     "min_curve_area": 60,
     "max_points": 2000,
     "x_kind_hint": "auto",

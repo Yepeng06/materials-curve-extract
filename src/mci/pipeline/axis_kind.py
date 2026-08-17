@@ -17,12 +17,14 @@ coordinate_mapper).  R^2 then only grades the chosen mapping.
 """
 from __future__ import annotations
 
+import itertools
 import re
 from typing import List, Optional, Tuple
 
 import numpy as np
 
 from ..schema import AxisKind, Tick
+from ..utils import parse_number_text
 
 
 _10N = re.compile(r"^10([0-9])$")  # '10N' glued superscript (N = exponent)
@@ -49,56 +51,228 @@ def _seq_scores(vals: List[float]) -> Optional[Tuple[float, float]]:
     return lin, log
 
 
-def resolve_values(ticks: List[Tick]) -> Tuple[List[Optional[float]], bool]:
-    """Resolve tick values, re-interpreting glued '10N' superscripts.
+def _candidates(text: str) -> List[float]:
+    """Plausible numeric values for an OCR'd tick text (original parse first).
 
-    Returns (values, re_resolved) where values has the SAME length as
-    ticks (None entries for valueless ticks -- callers zip them back onto
-    the ticks).  When every '10N' text re-read as 10^N makes the value
-    sequence clearly MORE consistent (geometric or arithmetic), the
-    re-resolved values are used.  A genuine '100' on a linear axis is
-    safe: re-reading it as 1 destroys the sequence.
+    matplotlib log-axis labels render decade ticks as 10^k with a real
+    superscript (10^0, 10^-1, ...); PP-OCRv4 misreads the superscript in
+    several recurring ways (B-5a diagnostics, 12 worst images):
+
+      * '101'/'102'/'103'  -- superscript digit glued to '10'  (10^1..10^3)
+      * '100'              -- superscript 0 glued on              (10^0 = 1)
+      * '10.0'             -- superscript 0 read as '.0'          (10^0 = 1)
+      * '10'               -- superscript lost                    (10^0 = 1
+                             or 10^-1 = 0.1 when minus+exp both lost)
+      * '10-'              -- exponent lost                       (10^-1..2)
+      * '012'/'0-2'        -- broken reads of 10^-2               (0.01)
+
+    The sequence-context disambiguation in :func:`resolve_values` picks
+    among these; a genuine '100'/'10' on a linear axis stays itself because
+    that keeps the arithmetic progression.
+    """
+    t = text.strip()
+    t = re.sub(r"[\s\u00A0\u2009]+", "", t)
+    v = parse_number_text(t)
+    cands: List[float] = [v] if v is not None else []
+    # leading/trailing-dot and broken reads of the 10N family:
+    # '.102'/'102.' (10^2 with a stray dot), '0-1' (10^-1/10^-2 with
+    # '1' read as '0')
+    t_norm = t.lstrip(".·").rstrip(".·")
+    if t_norm != t or t in ("0-1",):
+        if t in ("0-1",):
+            cands += [0.1, 0.01]
+        m0 = _10N.match(t_norm)
+        if m0:
+            e0 = int(m0.group(1))
+            if e0 != 0:
+                cands.append(10.0 ** e0)
+    if t == "10":
+        cands += [1.0, 0.1]
+    elif t == "100":
+        cands.append(1.0)
+    elif t == "10.0":
+        cands.append(1.0)
+    elif t == "10-":
+        cands += [0.1, 0.01]
+    elif t in ("012", "0-2"):
+        cands.append(0.01)
+    m = _10N.match(t)
+    if m:
+        e = int(m.group(1))
+        if e != 0:
+            cands.append(10.0 ** e)
+    seen: List[float] = []
+    for c in cands:
+        if not any(abs(c - s) <= 1e-9 * max(1.0, abs(c)) for s in seen):
+            seen.append(c)
+    return seen
+
+
+def _seq_score_of(vals: List[Optional[float]],
+                    pixels: Optional[List[float]] = None) -> float:
+    """Consistency score of a value list (smaller = better; 0 = perfect).
+
+    When pixel positions are available (B-5a), the criterion is the relative
+    std of the *px-per-unit* ratio: log axes have a constant px-per-decade,
+    linear axes a constant px-per-value-unit.  This couples the value
+    sequence to the geometry and rejects 'perfect' geometric progressions
+    that do not match the tick spacing (e.g. 3 values of a 4-tick log axis
+    with a missing tick misread into a clean [-2,-2] decade run over unequal
+    pixel gaps).  Falls back to the value-only _seq_scores criterion; for
+    2 values a power-of-ten pair scores 0 (log) and anything else 0.5.
+    """
+    f = [(float(p), v) for p, v in zip(pixels or [], vals) if v is not None]
+    if len(f) < 3:
+        return 0.0 if _value_sequence_vote([v for _, v in f]) is AxisKind.LOG else 0.5
+    f.sort()
+    p = np.asarray([x[0] for x in f], dtype=np.float64)
+    v = np.asarray([x[1] for x in f], dtype=np.float64)
+    dp = np.diff(p)
+    if len(f) >= 3 and float(np.ptp(p)) > 1e-9:
+        dv = np.diff(v)
+        # a real axis is monotone: alternating signs (e.g. [0.9,-0.9,0.9]
+        # from 0.1,1,0.1,1) are not a progression, no matter how 'regular'
+        # the |diff| ratios look after abs()
+        if (float(np.min(np.abs(dv))) > 1e-12 * max(1.0, float(np.max(np.abs(v))))
+                and not (np.any(dv > 0) and np.any(dv < 0))):
+            r_lin = dp / np.abs(dv)
+            if float(np.mean(r_lin)) > 1e-12:
+                lin = float(np.std(r_lin)) / float(np.mean(r_lin))
+            else:
+                lin = float("inf")
+        else:
+            lin = float("inf")
+    else:
+        lin = float("inf")
+    pos = v > 0
+    if int(pos.sum()) >= 3:
+        # adjacent positive ticks sorted by pixel: ldp and ldv correspond
+        p_pos = p[pos]
+        v_pos = v[pos]
+        order = np.argsort(p_pos)
+        ldv = np.diff(np.log10(v_pos[order]))
+        ldp = np.diff(p_pos[order])
+        if (float(np.min(np.abs(ldv))) > 1e-9
+                and not (np.any(ldv > 0) and np.any(ldv < 0))):
+            r_log = ldp / np.abs(ldv)
+            if float(np.mean(r_log)) > 1e-12:
+                log = float(np.std(r_log)) / float(np.mean(r_log))
+            else:
+                log = float("inf")
+        else:
+            log = float("inf")
+        # B-5a note: a decade-gap penalty was tried here but REMOVED -- it
+        # broke genuine log axes with a missing tick (img_0073: 1,100,1000
+        # reads as 'consistent' as the misread 100,102,103; the 10N
+        # preference in resolve_values breaks that tie correctly).
+    else:
+        log = float("inf")
+    s = min(lin, log)
+    return s if np.isfinite(s) else 0.5
+
+
+def resolve_values(ticks: List[Tick]) -> Tuple[List[Optional[float]], bool]:
+    """Resolve tick values, re-interpreting the '10N' superscript misread
+    family (B-5a): '100'/'10'/'10-'/'012'/'0-2'/'10.0'/'101' etc.
+
+    Every ambiguous tick carries a candidate list (:func:`_candidates`);
+    the combination that makes the whole-axis value sequence most consistent
+    (arithmetic or geometric, same criterion as before) wins.  A genuine
+    '100' on a linear axis is safe: keeping it preserves the progression.
+
+    Returns (values, changed) with values the SAME length as ticks (None
+    for valueless ticks).  Preserves the original parse on ties.
     """
     n = len(ticks)
     base: List[Optional[float]] = [None] * n
-    alt: List[Optional[float]] = [None] * n
+    cands: List[Optional[List[float]]] = [None] * n
     for i, t in enumerate(ticks):
-        if t.value is None:
+        c = _candidates(t.text)
+        if t.value is None and not c:
             continue
         base[i] = t.value
-        m = _10N.match(t.text.strip())
-        alt[i] = (10.0 ** int(m.group(1))) if m else t.value
+        cands[i] = c if len(c) > 1 else None
 
-    base_f = [v for v in base if v is not None]
-    alt_f = [v for v in alt if v is not None]
-    if alt_f == base_f or len(base_f) < 2:
+    if sum(1 for v in base if v is not None) < 2:
+        return base, False
+    amb = [i for i in range(n) if cands[i]]
+    if not amb:
         return base, False
 
-    if len(base_f) == 2:
-        # 2 ticks: accept the re-resolution when it produces a
-        # power-of-ten pair (e.g. '101' -> 10^1 -> [10, 0.1]) while the
-        # raw values are not one
-        if (_value_sequence_vote(alt_f) is AxisKind.LOG
-                and _value_sequence_vote(base_f) is not AxisKind.LOG):
-            return alt, True
-        return base, False
+    grid = [cands[i] for i in amb]  # type: ignore[list-item]
+    total = 1
+    for g in grid:
+        total *= len(g)
+    pixels = [t.pixel for t in ticks]
+    n_values = sum(1 for v in base if v is not None)
 
-    s0 = _seq_scores(base_f)
-    s1 = _seq_scores(alt_f)
-    if s0 is None or s1 is None:
-        return base, False
-    best0 = min(s0)
-    best1 = min(s1)
-    # accept when the re-resolved sequence is near-perfect AND clearly
-    # better: either the raw sequence is not near-perfect at all, or it is
-    # ambiguous (both progressions score ~0, e.g. glued '100/101/102/103'
-    # which is trivially arithmetic AND geometric) while the re-resolved
-    # one is clearly typed (one score far below the other)
-    if best1 < 0.05:
-        if best0 >= 0.05 or (abs(s0[0] - s0[1]) < 0.02
-                             and abs(s1[0] - s1[1]) > 0.1):
-            return alt, True
-    return base, False
+    def _is_10n(c: float) -> bool:
+        if c <= 0:
+            return False
+        l = float(np.log10(c))
+        return abs(l - round(l)) < 1e-6
+
+    def _better(a: Tuple[float, int, int], b: Tuple[float, int, int]) -> bool:
+        # (score, n_10n_rereads, n_diffs): score dominates; within EPS the
+        # combination that uses more 10^N re-resolutions wins -- pixel noise
+        # of ~2% makes '102' vs 10^2 nearly tied, and the 10N reading is
+        # the matplotlib-log reality.  A perfect 0.0 tie keeps the original
+        # parse (e.g. the 2-tick power-of-ten pair '0.1','10').
+        sa, pa, na = a
+        sb, pb, nb = b
+        if sa < sb - 0.01:
+            return True
+        if sa > sb + 0.01:
+            return False
+        # within EPS
+        if sa == 0.0 and sb == 0.0:
+            # both progressions perfect: glued superscripts make e.g.
+            # 100,101,102,103 perfectly arithmetic AND geometric -- the
+            # 10N re-resolution is the matplotlib-log reality.  With 2
+            # values there is no sequence information at all, so keep the
+            # original parse.
+            if n_values >= 3 and pa != pb:
+                return pa > pb
+            return na < nb
+        if sa == 0.0:
+            return True
+        if sb == 0.0:
+            return False
+        if pa != pb:
+            return pa > pb
+        return na < nb
+
+    if total <= 256:
+        best: Optional[Tuple[Tuple[float, int, int], List[Optional[float]]]] = None
+        for combo in itertools.product(*grid):
+            vals = list(base)
+            n10 = 0
+            for i, c in zip(amb, combo):
+                vals[i] = c
+                if c != base[i] and _is_10n(c):
+                    n10 += 1
+            s = _seq_score_of(vals, pixels)
+            ndiff = sum(1 for i, c in zip(amb, combo) if c != base[i])
+            key = (s, n10, ndiff)
+            if best is None or _better(key, best[0]):
+                best = (key, vals)
+        assert best is not None
+        vals = best[1]
+    else:
+        # greedy fallback: fix each ambiguous tick one at a time
+        vals = list(base)
+        for i in amb:
+            cur_best: Optional[Tuple[float, float]] = None
+            for c in cands[i]:  # type: ignore[union-attr]
+                vals[i] = c
+                s = _seq_score_of(vals, pixels)
+                if cur_best is None or s < cur_best[0]:
+                    cur_best = (s, c)
+            assert cur_best is not None
+            vals[i] = cur_best[1]
+
+    changed = any(vals[i] != base[i] for i in amb)
+    return vals, changed
 
 
 def _majority_consistency(vals: List[float]) -> Optional[AxisKind]:

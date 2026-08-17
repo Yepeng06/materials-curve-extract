@@ -86,17 +86,21 @@ def test_classify_non_numeric_y_axis_title_is_harmless():
 # ---------------------------------------------------------------------------
 # whole-image OCR fallback
 # ---------------------------------------------------------------------------
-def _strip2x(boxes, ox, oy):
-    """Convert full-image boxes to 2x upscaled strip-local coordinates,
+def _stripNx(boxes, n, ox, oy):
+    """Convert full-image boxes to n-x upscaled strip-local coordinates,
     which is what the real PaddleOCR backend returns for strip crops
-    (_ocr_strips divides by the scale and adds the strip offset)."""
+    (_ocr_strip_scaled divides by the scale and adds the strip offset)."""
 
     def conv(b):
-        return _textbox((b.box[0][0] - ox) * 2, (b.box[0][1] - oy) * 2,
-                        (b.box[2][0] - ox) * 2, (b.box[2][1] - oy) * 2,
+        return _textbox((b.box[0][0] - ox) * n, (b.box[0][1] - oy) * n,
+                        (b.box[2][0] - ox) * n, (b.box[2][1] - oy) * n,
                         b.text, b.score)
 
     return [conv(b) for b in boxes]
+
+
+def _strip2x(boxes, ox, oy):
+    return _stripNx(boxes, 2, ox, oy)
 
 
 class _FakeStripOCR:
@@ -108,6 +112,8 @@ class _FakeStripOCR:
     def __init__(self, x_strip, y_strip, full, x_off=(70, 494), y_off=(0, 80)):
         self.x_strip = _strip2x(x_strip, *x_off)
         self.y_strip = _strip2x(y_strip, *y_off)
+        self.x_strip4 = _stripNx(x_strip, 4, *x_off)
+        self.y_strip4 = _stripNx(y_strip, 4, *y_off)
         self.full = full
         self.calls = 0
 
@@ -117,7 +123,11 @@ class _FakeStripOCR:
             return self.x_strip
         if self.calls == 2:
             return self.y_strip
-        return self.full
+        if self.calls == 3:
+            return self.full
+        if self.calls == 4:
+            return self.x_strip4  # B-5a 4x re-OCR of the x strip
+        return self.y_strip4      # B-5a 4x re-OCR of the y strip
 
 
 def test_whole_image_fallback_when_strips_empty():
@@ -131,7 +141,9 @@ def test_whole_image_fallback_when_strips_empty():
     ]
     ocr = _FakeStripOCR(x_strip=[], y_strip=[], full=full)
     x_ticks, y_ticks = read_ticks(img, struct, ocr, {"tick_assoc_tol_px": 80})
-    assert ocr.calls == 3  # x strip + y strip + full-image fallback
+    # x strip + y strip + full-image fallback + B-5a 4x re-OCR of both
+    # still-short axes (x has 1 valued tick, y has 2 with 4 marks)
+    assert ocr.calls == 5
     nv_x = sum(1 for t in x_ticks if t.value is not None)
     nv_y = sum(1 for t in y_ticks if t.value is not None)
     assert nv_x == 1
@@ -172,7 +184,9 @@ def test_fallback_when_few_read_but_many_marks():
     full = x_strip + y_strip + [_textbox(40, 320, 70, 338, "20")]
     ocr = _FakeStripOCR(x_strip=x_strip, y_strip=y_strip, full=full)
     x_ticks, y_ticks = read_ticks(img, struct, ocr, {"tick_assoc_tol_px": 80})
-    assert ocr.calls == 3  # x strip + y strip + full-image fallback
+    # x strip + y strip + full-image fallback + B-5a 4x re-OCR of the two
+    # axes that are still short (2 valued ticks over 4 marks)
+    assert ocr.calls == 5
     assert sum(1 for t in y_ticks if t.value is not None) == 2
 
 
