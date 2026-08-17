@@ -176,8 +176,12 @@ def _associate(
         j = tick_label.get(i)
         if j is not None:
             lb = labels[j]
-            pixel = lb.center[axis_i] if lb.anchored else p
-            ticks.append(Tick(pixel=pixel, value=parse_number_text(lb.text),
+            # B-5a: use the LABEL CENTRE as the tick pixel, not the CV
+            # mark -- the mark detector drifts near the plot top (measured
+            # +9.5 px on img_0069's y axis, 21-40% slope error), while the
+            # text-box centre aligns with the GT label centre.
+            ticks.append(Tick(pixel=float(lb.center[axis_i]),
+                              value=parse_number_text(lb.text),
                               text=lb.text, score=lb.score))
         else:
             ticks.append(Tick(pixel=p, value=None, text="", score=0.0))
@@ -185,6 +189,11 @@ def _associate(
     # actually matched): if nearly nothing matched, the tick marks were
     # misdetected and the label centres must carry the axis (fail_001 /
     # img_0008 scenario -- strict mode would throw every real label away).
+    # B-5a fix: even in strict mode, keep unmatched labels that lie
+    # OUTSIDE the matched-tick pixel range -- first/last tick marks are
+    # frequently missed (img_0035 synth: 0.1 has no mark, minors start
+    # at 0.2), and dropping a genuine end tick loses a decade; stray
+    # title fragments sit INSIDE the sequence (img_0013) and stay dropped.
     if not drop_unmatched or len(used_labels) < 2:
         for j, lb in enumerate(labels):
             if j not in used_labels:
@@ -196,6 +205,15 @@ def _associate(
                         score=lb.score,
                     )
                 )
+    else:
+        matched_px = [labels[j].center[axis_i] for j in used_labels]
+        for j, lb in enumerate(labels):
+            if j in used_labels:
+                continue
+            px = float(lb.center[axis_i])
+            if not matched_px or px < min(matched_px) - 1e-6 or px > max(matched_px) + 1e-6:
+                ticks.append(Tick(pixel=px, value=parse_number_text(lb.text),
+                                  text=lb.text, score=lb.score))
     ticks.sort(key=lambda t: t.pixel)
     return ticks
 
