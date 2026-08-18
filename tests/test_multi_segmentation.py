@@ -1,4 +1,5 @@
 """Phase C: multi-curve instance segmentation tests."""
+import json
 import os
 import sys
 
@@ -9,30 +10,49 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 
 # ---------------------------------------------------------------------------
-# instance masks from meta.curves_px polylines
+# instance masks rebuilt from GT CSVs through the label mapping
 # ---------------------------------------------------------------------------
-def test_meta_instance_masks_separates_curves():
+def _mk_fixture(tmp_path, n_curves):
+    import csv as _csv
+    labels = [
+        {"box": [[80, 542], [120, 542], [120, 562], [80, 562]], "text": "1", "score": 1.0},
+        {"box": [[350, 542], [390, 542], [390, 562], [350, 562]], "text": "10", "score": 1.0},
+        {"box": [[60, 500], [100, 500], [100, 520], [60, 520]], "text": "0", "score": 1.0},
+        {"box": [[60, 300], [100, 300], [100, 320], [60, 320]], "text": "0.5", "score": 1.0},
+    ]
+    (tmp_path / "img_labels.json").write_text(json.dumps(labels), encoding="utf-8")
+    curves = {"num_curves": n_curves, "curves": []}
+    for i in range(n_curves):
+        fn = f"img_c{i}.csv"
+        (tmp_path / fn).write_text(
+            "x,y\n" + "\n".join(f"{x},{0.1 * (i + 1) + 0.001 * x}" for x in range(1, 101)),
+            encoding="utf-8",
+        )
+        curves["curves"].append({"curve_id": f"curve_{i}", "label": f"Curve {i}", "csv": fn})
+    (tmp_path / "img_curves.json").write_text(json.dumps(curves), encoding="utf-8")
+    return curves
+
+
+def test_meta_instance_masks_separates_curves(tmp_path):
     from train.train_segmentation_multi import _meta_instance_masks
 
-    meta = {"curves_px": [
-        [[20.0, 30.0], [40.0, 30.0], [60.0, 30.0], [80.0, 30.0]],
-        [[20.0, 70.0], [40.0, 70.0], [60.0, 70.0], [80.0, 70.0]],
-    ]}
-    m = _meta_instance_masks(meta, (100, 100), k=6)
+    curves_json = _mk_fixture(tmp_path, 2)
+    labels = json.loads((tmp_path / "img_labels.json").read_text(encoding="utf-8"))
+    m = _meta_instance_masks({}, labels, curves_json, str(tmp_path), (400, 600), k=6)
     assert m.shape[0] == 6
     c0 = m[0] > 0
     c1 = m[1] > 0
     assert c0.sum() > 0 and c1.sum() > 0
     assert not (c0 & c1).any()  # separated instances
-    assert (c0[30].sum() > 0) and (c1[70].sum() > 0)
     assert (m[2] > 0).sum() == 0  # extra channels empty
 
 
-def test_meta_instance_masks_single_curve():
+def test_meta_instance_masks_single_curve(tmp_path):
     from train.train_segmentation_multi import _meta_instance_masks
 
-    meta = {"curves_px": [[[10.0, 50.0], [50.0, 50.0], [90.0, 50.0]]]}
-    m = _meta_instance_masks(meta, (100, 100), k=6)
+    curves_json = _mk_fixture(tmp_path, 1)
+    labels = json.loads((tmp_path / "img_labels.json").read_text(encoding="utf-8"))
+    m = _meta_instance_masks({}, labels, curves_json, str(tmp_path), (400, 600), k=6)
     assert (m[0] > 0).sum() >= 50
     assert (m[1] > 0).sum() == 0
 

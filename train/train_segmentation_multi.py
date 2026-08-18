@@ -3,17 +3,17 @@
 Usage (from the repo root, mci env):
   python train/train_segmentation_multi.py       --data-dir data/train_platform,data/train_platform_single       --val-dir data/val_multi,data/val_single       --epochs 60 --batch 8 --size 512       --init models/checkpoints/unet_curve.pt       --out models/checkpoints/unet_multi_curve.pt
 
-Instance masks: K=6 channels (max curves).  The semantic mask (mask.png)
-covers all curves; per-instance channels are recovered by gray-level
-k-means INSIDE the semantic mask region (dashed segments of one curve
-share the same color), so the model learns to separate instances.  The
-channel order is the (deterministic) cluster-label order per image -- the
-network only needs instance separation, not a cross-image channel meaning
+Instance masks: K=6 channels (max curves).  Per-instance channels are
+REBUILT from the GT CSVs through the tick-label mapping (labels.json),
+which is the exact basis the evaluator compares against (validated 0.4px
+mean agreement with the single-curve 512 model).  The network learns
+instance separation; the channel order is the curves.json order per image
 (LineFormer-style instance regression).
 """
 from __future__ import annotations
 
 import argparse
+import csv as csvlib
 import glob
 import json
 import os
@@ -49,26 +49,86 @@ def _list_pairs(data_dir: str):
     return pairs
 
 
-def _meta_instance_masks(meta: dict, img_size: tuple, k: int = K,
-                        width: int = 3) -> np.ndarray:
-    """K-channel 0/1 instance masks from meta.curves_px polylines.
+def _fit_axis_from_labels(labels: list, axis: str, img_h: int):
+    """Fit px<->value from GT label boxes (value = text, px = box centre).
 
-    The renderer samples each curve at its data points, so the
-    curves_px polyline passes EXACTLY through the GT data points;
-    a model trained on these masks extracts curves that agree with
-    the GT CSV interpolation (which is itself linear between data
-    points).  Gray-level clustering was tried and rejected: dashed
-    curves + antialiasing make same-curve pixels span many gray
-    levels while different curves can share levels (img_0200).
+    Matches the evaluation basis: GT CSV data points are compared
+    against predictions through this same tick-label mapping, so a
+    model trained on masks rebuilt through it extracts curves that
+    agree with the GT interpolation (validated: 0.4px mean vs the
+    single-curve 512 model on val_single).
     """
-    curves = meta.get("curves_px") or []
+    from mci.utils import parse_number_text
+    pts = []
+    for it in labels:
+        box = np.asarray(it["box"], dtype=float)
+        c = box.mean(axis=0)
+        v = parse_number_text(str(it["text"]))
+        if v is None:
+            continue
+        if axis == "x" and c[1] > img_h - 80:
+            pts.append((float(c[0]), v))
+        elif axis == "y" and c[0] < 100 and c[1] < img_h - 85:
+            pts.append((float(c[1]), v))
+    if len(pts) < 2:
+        return None
+    pts.sort()
+    p = np.array([q[0] for q in pts])
+    v = np.array([q[1] for q in pts])
+    if (v > 0).all() and (float(v.max()) / float(v.min()) > 100):
+        a, b = np.polyfit(p, np.log10(v), 1)
+        return ("log", float(a), float(b))
+    a, b = np.polyfit(p, v, 1)
+    return ("linear", float(a), float(b))
+
+
+def _px_of(fit, v):
+    kind, a, b = fit
+    vv = np.asarray(v, dtype=np.float64)
+    if kind == "log":
+        vv = np.where(vv > 0, vv, 1e-9)  # non-positive values: clamp
+        return (np.log10(vv) - b) / a
+    return (vv - b) / a
+
+
+def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
+                        base_dir: str, img_size: tuple, k: int = K,
+                        width: int = 3) -> np.ndarray:
+    """K-channel instance masks rebuilt from the GT CSVs through the
+    tick-label mapping (the evaluation basis).
+
+    Replaces the curves_px polyline masks: those 16 sampled pixels do
+    not trace the full rendered curve (160+ data points), so a model
+    trained on them drifts from the GT interpolation.  Rebuilding the
+    dense curve through the SAME mapping that the evaluator uses makes
+    the training target and the acceptance metric consistent.
+    """
     w, h = img_size
     out = np.zeros((k, h, w), np.uint8)
-    for i, c in enumerate(curves[:k]):
-        pts = np.array([[int(round(p[0])), int(round(p[1]))] for p in c], dtype=np.int32)
+    if not curves_json or "curves" not in curves_json:
+        return out
+    fx = _fit_axis_from_labels(labels, "x", h)
+    fy = _fit_axis_from_labels(labels, "y", h)
+    if fx is None or fy is None:
+        return out
+    for i, c in enumerate(curves_json["curves"][:k]):
+        csv_path = os.path.join(base_dir, c["csv"])
+        if not os.path.exists(csv_path):
+            continue
+        with open(csv_path, encoding="utf-8") as f:
+            rows = [r for r in csvlib.reader(f) if r and not r[0].startswith("#")]
+        data = np.array([[float(r[0]), float(r[1])] for r in rows[1:]])
+        if len(data) < 2:
+            continue
+        gx = _px_of(fx, data[:, 0])
+        gy = _px_of(fy, data[:, 1])
+        pts = np.array([[int(round(x)), int(round(y))] for x, y in zip(gx, gy)],
+                      dtype=np.int32)
         cv2.polylines(out[i], [pts], False, 255, thickness=width,
                       lineType=cv2.LINE_AA)
     return out
+
+
 
 
 class ChartDataset(Dataset):
@@ -96,7 +156,19 @@ class ChartDataset(Dataset):
         if self.cache is not None and key in self.cache:
             inst = self.cache[key]
         else:
-            inst = _meta_instance_masks(meta, (img.shape[1], img.shape[0]))
+            labels = []
+            lab_p = img_path[:-4] + "_labels.json"
+            if os.path.exists(lab_p):
+                with open(lab_p, encoding="utf-8") as f:
+                    labels = json.load(f)
+            curves_json = {}
+            cj_p = img_path[:-4] + "_curves.json"
+            if os.path.exists(cj_p):
+                with open(cj_p, encoding="utf-8") as f:
+                    curves_json = json.load(f)
+            inst = _meta_instance_masks(meta, labels, curves_json,
+                                        os.path.dirname(img_path),
+                                        (img.shape[1], img.shape[0]))
             if self.cache is not None:
                 self.cache[key] = inst
         img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_AREA)
