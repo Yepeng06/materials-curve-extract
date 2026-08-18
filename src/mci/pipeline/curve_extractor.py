@@ -542,8 +542,30 @@ def extract_curves(
     )
     return [curve]
 
-def extract_curves_multi(
-    image_bgr: np.ndarray,
+def _truncate_jumps(chain, max_jump: float = 30.0, min_len: int = 40):
+    """Cut chain tails where y jumps abruptly and keeps jumping.
+
+    Phase C: when a channel mask fades out (model unsure, e.g. a steep
+    tail at prob 0.44), the tracer follows leftover pixels of another
+    curve and the chain jumps tens of pixels; the jumped portion is
+    worse than useless (it poisons the RMSE), so it is cut.
+    """
+    if len(chain) < min_len + 2:
+        return chain
+    xs = np.asarray([p[0] for p in chain], dtype=np.float64)
+    ys = np.asarray([p[1] for p in chain], dtype=np.float64)
+    dy = np.abs(np.diff(ys))
+    cut = len(chain)
+    for i in range(len(chain) - 2, -1, -1):
+        if dy[i] > max_jump and dy[i + 1] > max_jump:
+            cut = i + 1
+            break
+    if cut < min_len:
+        return chain
+    return chain[:cut]
+
+
+def extract_curves_multi(    image_bgr: np.ndarray,
     structure: ChartStructure,
     x_axis: AxisSpec,
     y_axis: AxisSpec,
@@ -563,6 +585,12 @@ def extract_curves_multi(
     plot_w, plot_h = x1 - x0 + 1, y1 - y0 + 1
     if plot_w < 20 or plot_h < 20:
         raise CurveExtractionError("plot area too small")
+    # B-5a/Phase C tuning: the acceptance threshold 0.5 drops curve
+    # portions the model is unsure about (e.g. a steep tail at 0.44),
+    # which then misleads the tracer; 0.3 recovers them.  Jump
+    # truncation cuts chains that left the curve (sustained |dy| jumps).
+    thr = float(cfg.get("multi_mask_thr", 0.3))
+    trunc = bool(cfg.get("multi_truncate_jumps", True))
 
     prob = segmenter.prob_full(image_bgr)  # (K, H, W)
     if prob.ndim != 3 or prob.shape[0] < 1:
@@ -574,13 +602,13 @@ def extract_curves_multi(
     # the highest probability (argmax over the plot region), preventing
     # the skeleton tracer from switching curves at crossings.
     reg = prob[:, y0 : y1 + 1, x0 : x1 + 1]  # (K, H, W)
+    amax = np.argmax(reg, axis=0)  # winner channel per pixel
     curves: List[Curve] = []
     for c in range(prob.shape[0]):
         region = reg[c]
-        if float(region.max()) < 0.5:
+        if float(region.max()) < thr:
             continue
-        amax = np.argmax(reg, axis=0)  # winner channel per pixel
-        mask01 = ((region > 0.5) & (amax == c)).astype(np.uint8)
+        mask01 = ((region > thr) & (amax == c)).astype(np.uint8)
         mask01 = _filter_mask_fragments(mask01, plot_w, plot_h)
         if int(mask01.sum()) < 16:
             continue
@@ -596,6 +624,8 @@ def extract_curves_multi(
             chain = _column_centroid(region)
         if not chain or len(chain) < 8:
             continue
+        if trunc:
+            chain = _truncate_jumps(chain)
         chain = downsample_chain(chain, int(cfg.get("max_points", 2000)))
         points = [(x_axis.pixel_to_value(x0 + px), y_axis.pixel_to_value(y0 + py))
                   for px, py in chain]
