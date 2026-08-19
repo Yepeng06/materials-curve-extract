@@ -17,7 +17,8 @@
 | B-3 | 三信号坐标判型（值序列+像素间距+外部先验） | ✅ 轴类型 x/y 96% |
 | B-4 | YOLOv8-nano 结构检测（6 类，mAP50 0.942） | ✅ 可切换 structure_backend: cv|yolo |
 | **B-5a** | OCR 刻度值误读增强（10^N 上标家族消歧/低分过滤/4x 重 OCR/标签中心像素/缺刻度补全） | ✅ **paddle 达标率 70%→99%** |
-| **Phase C 首轮** | 多曲线实例分割（U-Net K=6 通道）、CSV 重建实例掩码、多曲线提取/评估管线 | 🟡 **召回 67.7%**（目标 95%） |
+| **Phase C 首轮** | 多曲线实例分割（U-Net K=6 通道）、CSV 重建实例掩码、多曲线提取/评估管线 | 🟡 召回 67.7%（目标 95%） |
+| **C-2 根因修复** | 训练目标与评估基准统一（同代码路径重建掩码）+ EMA + 骨架召回损失 + 6a/6b 双口径 + 虚检抑制 | 🔄 **重训中（2026-08-19）** |
 
 ### 做得好（关键成功点）
 1. **B-5a 三连突破**：候选解析+序列消歧（'100'=10⁰ 等）→ 86%；**标签中心像素**（CV mark 检测顶部漂移 +9.5px 是隐蔽根因）→ **99%**；pytest 106/106、stub 零回退
@@ -27,7 +28,8 @@
 ### 不够理想 / 问题在哪
 | 问题 | 根因 | 现状 |
 |------|------|------|
-| Phase C 召回 67.7% vs 目标 95% | ① 87/175 条失败是 1-2% **边缘型**（模型精度边际，纯训练已平台化：512c 66.7%→512d 64.1% 无增益）；② 61 条 2-5%；③ 27 条 >5%（曲线靠近处**通道归属混淆**/追踪跳线） | 见"解决办法" |
+| Phase C 召回 67.7% vs 目标 95% | **【2026-08-19 根因突破】训练目标与评估基准不一致**：训练侧 _fit_axis_from_labels 的底部标签过滤（c[1]<img_h-85）排除最底部 y 刻度 → **25.5% y 轴（904/3548）+1.8% x 轴训练图把 log 轴误判 linear**，log 轴上掩码错位 100+px → 训练平台化（512c→512d 无增益实为巩固错误目标）、systematic_bias（同图 4 曲线同向偏 -1.4%）、log 轴图全失败 | 已修复（训练改用与评估完全相同的 detect_structure→read_ticks→build_axes 路径重建掩码），**重训验证中** |
+| 失败分布（修复前） | 1-2% 边缘 83 条（log 轴 1px≈2% rel + 模型概率峰值 +1~2px 偏移）；2-5% 47 条；>5% local_spike 41 条（尾部集中：decile 8-9 占 68%，曲线汇聚处通道归属混淆）；虚检 19 图（pred=5，面积 51-625px 碎片） | 修复后预期：systematic_bias/边缘类大幅改善；local_spike 待新模型复测 |
 | 单曲线召回 91.7%（5/60 失败） | 多任务 6 通道共享编码器精度略低于专用单曲线模型（单曲线模型 100%） | 可接受（单曲线场景可用单曲线模型） |
 | 真实图验证未开始 | 用户真实论文图仍在收集 | 待用户 |
 | 多曲线 Web 展示未接 | Phase C 未达标 | 后续 |
@@ -39,12 +41,14 @@
 4. **推理侧**：阈值 0.3 + 跳变截断已落地（+1%）；细化半径 3 最优（69.2%）；语义细化失败（单曲线模型不支持多曲线语义）
 5. **验收对齐**：与用户确认 95% 召回的口径（合成集 vs 真实图；含曲线数错误惩罚否）
 
-### 后续计划（优先级）
-1. **【需训练，先请示】Phase C 突破**：base 96 训练（~5h）或数据扩展，目标召回 ≥90%
-2. **【依赖用户】B-5 真实图验证**：图到位后 --ocr paddle 评估 + gold 标注 RMSE
-3. **【无需训练】5.2 多曲线评估基建**（legend_matcher 增强、evaluate 多曲线模式）——Phase C 验收需要
-4. **【无需训练】5.4 Phase D 验收材料**（500 张独立 seed 验收集 + ablation 报告）
-5. **【需训练，先请示】5.6 B-4 增强**（x_axis_line mAP 0.749 弱）或 OCR 微调
+### 后续计划（优先级，2026-08-19 更新）
+1. **【训练中】C-2 根因修复重训**（evalfix：统一训练/评估映射 + EMA + 骨架召回损失，25 epoch，已启动 ~3-5h）→ 训后跑 eval_multi_6ab 对比 6a/6b；预期 systematic_bias 类大幅改善
+2. **【重训后评估】失败复测**：eval_multi_diag + diag_error_pattern 复跑，看 local_spike/边缘类是否随修复改善；决定是否做 Hungarian 交叉分支配对（研究建议最高杠杆纯后处理）
+3. **【可选】虚检抑制落地**：multi_min_area 已实现（曲线数 47/60→57/60，6b +1.5pp，6a -0.8pp），新模型上精细调参后默认开启
+4. **【依赖用户】B-5 真实图验证**：图到位后 --ocr paddle 评估 + gold 标注 RMSE
+5. **【无需训练】5.2 多曲线评估基建**（legend_matcher 增强、evaluate 多曲线模式）——Phase C 验收需要
+6. **【无需训练】5.4 Phase D 验收材料**（500 张独立 seed 验收集 + ablation 报告）
+7. **【需训练，先请示】5.6 B-4 增强**（x_axis_line mAP 0.749 弱）或 OCR 微调
 
 ### 技术栈（现状）
 - Python 3.11（Anaconda env **mci**）、PyTorch 2.13+cu126（GPU）、ultralytics 8.4.115（YOLOv8n）、
@@ -154,12 +158,20 @@
 - 刻度文本/坐标校准：ChartEye（arXiv:2408.16123）、ICDAR CHART-Infographics、
   PlotQA 文本角色分类；US 专利 20190130614A1 序列校验；WebPlotDigitizer 自动刻度检测；
   PaddleOCR 多尺度/limit_side_len 陷阱（Discussion #14271）、垂直文本（3693449）
-- 多曲线：**LineFormer**（arXiv:2305.01837 实例分割范式）、Socratic Chart
+- 多曲线：**LineFormer**（arXiv:2305.01837 实例分割范式；**6a/6b 双口径评估**、
+  交叉多标签掩码、社区实证过检是召回元凶）、**ChartZero**（arXiv:2605.05820
+  GOI 损失：类内拉近+类间正交+小簇合并，CoordConv）、Socratic Chart
   （arXiv:2504.09764 掩码细化）、Efficient extraction of experimental data from
-  line charts（Graphical Models 2025）、UW InfoVis 2018 颜色映射提取、
+  line charts（Graphical Models 2025，Mamba+掩码引导训练）、AI-ChartParser
+  （CGF 2025）、Graph-FINDER（npj Comput. Mater. 2026）、EpiCurveBench
+  （medRxiv 2025，NLD 配对+ERP 容错距离）、UW InfoVis 2018 颜色映射提取、
   thu-digitizer（确定性+校验工程化）
-- 本阶段经验：训练目标必须与评估基准一致（CSV 重建掩码）；灰度聚类在虚线/抗锯齿下失效；
-  512 分辨率是曲线位置精度关键；单曲线模型不支持多曲线语义分割
+- 细长结构：clDice（arXiv:2003.07311）、Skeleton Recall Loss（ECCV 2024）、
+  Focal Tversky、Boundary Loss、Steger 亚像素脊线、骨架交叉点 Hungarian 分支配对
+- 本阶段经验：**训练目标必须与评估基准一致（不止 CSV 重建，还要同一轴映射代码路径——
+  25.5% log 轴图因训练侧标签过滤误判 linear 而掩码错位 100+px）**；灰度聚类在虚线/
+ 抗锯齿下失效；512 分辨率是曲线位置精度关键；单曲线模型不支持多曲线语义分割；
+  纯训练平台化时先查训练目标与评估基准的一致性
 
 ## 五、下一步计划（按优先级）
 
