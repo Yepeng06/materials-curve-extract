@@ -156,11 +156,12 @@ def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
 
 
 class ChartDataset(Dataset):
-    def __init__(self, pairs, augment=False, size=SIZE, cache=None):
+    def __init__(self, pairs, augment=False, size=SIZE, cache=None, skel_cache=None):
         self.pairs = pairs
         self.augment = augment
         self.size = size
         self.cache = cache  # dict path -> K-channel mask (for single-curve reuse)
+        self.skel_cache = skel_cache  # dict path -> K-channel GT skeleton
 
     def __len__(self):
         return len(self.pairs)
@@ -179,6 +180,11 @@ class ChartDataset(Dataset):
         key = img_path
         if self.cache is not None and key in self.cache:
             inst = self.cache[key]
+            skel = (self.skel_cache or {}).get(key)
+            if skel is None:
+                skel = _instance_skeletons(inst)
+                if self.skel_cache is not None:
+                    self.skel_cache[key] = skel
         else:
             labels = []
             lab_p = img_path[:-4] + "_labels.json"
@@ -221,26 +227,53 @@ class ChartDataset(Dataset):
             inst = _meta_instance_masks(meta, labels, curves_json,
                                         os.path.dirname(img_path),
                                         (img.shape[1], img.shape[0]), axes=axes)
+            skel = _instance_skeletons(inst)
             if self.cache is not None:
                 self.cache[key] = inst
+                if self.skel_cache is not None:
+                    self.skel_cache[key] = skel
         img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_AREA)
         inst = cv2.resize(inst.transpose(1, 2, 0), (self.size, self.size),
                           interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
+        skel = cv2.resize(skel.transpose(1, 2, 0), (self.size, self.size),
+                          interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
 
         if self.augment:
-            img, inst = _augment(img, inst)
+            img, inst, skel = _augment(img, inst, skel)
 
         x = torch.from_numpy(img).float().unsqueeze(0) / 255.0
         y = (torch.from_numpy(inst).float() / 255.0 > 0.5).float()
-        return x, y
+        s = (torch.from_numpy(skel).float() / 255.0 > 0.5).float()
+        return x, y, s
 
 
-def _augment(img: np.ndarray, inst: np.ndarray) -> tuple:
-    """Augment image + K-channel instance masks together (reuses baseline)."""
+def _instance_skeletons(inst: np.ndarray) -> np.ndarray:
+    """Per-channel binary skeleton of the instance masks (K,H,W uint8).
+
+    Used as the GT side of the skeleton-recall loss (clDice-family):
+    the loss only needs the GT skeleton (precomputed once per image),
+    and penalizes predictions that miss the skeleton pixels -- directly
+    targeting dash/gap/jump failures on thin structures.
+    """
+    from skimage.morphology import skeletonize
+    k, h, w = inst.shape
+    out = np.zeros((k, h, w), np.uint8)
+    for c in range(k):
+        m = inst[c] > 0
+        if m.sum() < 4:
+            continue
+        out[c] = (skeletonize(m).astype(np.uint8)) * 255
+    return out
+
+
+def _augment(img: np.ndarray, inst: np.ndarray, skel: np.ndarray = None) -> tuple:
+    """Augment image + K-channel instance masks (and skeletons) together."""
     size = img.shape[0]
     if random.random() < 0.5:
         img = cv2.flip(img, 1)
         inst = cv2.flip(inst, 2)
+        if skel is not None:
+            skel = cv2.flip(skel, 2)
     if random.random() < 0.4:
         g = random.uniform(0.8, 1.25)
         b = random.uniform(-25, 25)
@@ -252,6 +285,9 @@ def _augment(img: np.ndarray, inst: np.ndarray) -> tuple:
         for c in range(inst.shape[0]):
             inst[c] = cv2.warpAffine(inst[c], m, (size, size),
                                      flags=cv2.INTER_NEAREST, borderValue=0)
+            if skel is not None:
+                skel[c] = cv2.warpAffine(skel[c], m, (size, size),
+                                         flags=cv2.INTER_NEAREST, borderValue=0)
     if random.random() < 0.25:
         ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, random.randint(60, 90)])
         img = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
@@ -265,12 +301,17 @@ def _augment(img: np.ndarray, inst: np.ndarray) -> tuple:
         inst = np.stack([cv2.resize(inst_c[c], (size, size),
                                     interpolation=cv2.INTER_NEAREST)
                          for c in range(inst.shape[0])])
+        if skel is not None:
+            skel_c = skel[:, y0:y0 + cs, x0:x0 + cs]
+            skel = np.stack([cv2.resize(skel_c[c], (size, size),
+                                        interpolation=cv2.INTER_NEAREST)
+                             for c in range(skel.shape[0])])
     if random.random() < 0.15:
         noise = (np.random.default_rng().random(img.shape) < 0.0008)
         img = img.copy()
         img[noise] = 0
         img[np.random.default_rng().random(img.shape) < 0.0008] = 255
-    return img, inst
+    return img, inst, skel
 
 
 def main() -> int:
@@ -287,6 +328,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--per-dir-limit", type=int, default=0,
                     help="cap training pairs PER directory (balanced subset)")
+    ap.add_argument("--ema-decay", type=float, default=0.999,
+                    help="EMA decay for weight averaging (0 disables)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -317,8 +360,11 @@ def main() -> int:
         return 1
 
     cache: dict = {}
-    train_ds = ChartDataset(pairs, augment=True, size=args.size, cache=cache)
-    val_ds = ChartDataset(val_pairs, augment=False, size=args.size, cache=cache)
+    skel_cache: dict = {}
+    train_ds = ChartDataset(pairs, augment=True, size=args.size, cache=cache,
+                            skel_cache=skel_cache)
+    val_ds = ChartDataset(val_pairs, augment=False, size=args.size, cache=cache,
+                          skel_cache=skel_cache)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=0, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
@@ -328,13 +374,33 @@ def main() -> int:
         ckpt = torch.load(args.init, map_location=device, weights_only=False)
         sd = ckpt["state_dict"]
         # encoder weights transfer; the output head (1 -> K channels) is new
+        # when init is a single-curve model, but when init is a K-channel
+        # multi model (e.g. continuing 512c) the out head must transfer too.
         sd = {k: v for k, v in sd.items() if k.startswith("enc") or k.startswith("bottleneck")
-              or k.startswith("up") or k.startswith("dec")}
-        model.load_state_dict(sd, strict=False)
-        print(f"initialized encoder from {args.init}")
+              or k.startswith("up") or k.startswith("dec") or k.startswith("out")}
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        print(f"initialized from {args.init} (missing={len(missing)} unexpected={len(unexpected)})")
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+
+    # EMA (zero-risk stabilizer; STU-Net/SegFormer-style evaluation uses the
+    # averaged weights -- keeps the thin-structure precision improvements)
+    ema_decay = float(getattr(args, "ema_decay", 0.999))
+    ema_model = None
+    if ema_decay > 0:
+        ema_model = UNet(in_channels=1, base=64, out_channels=K).to(device)
+        ema_model.load_state_dict(model.state_dict())
+        ema_model.eval()
+
+    def _ema_update():
+        if ema_model is None:
+            return
+        with torch.no_grad():
+            for p, ep in zip(model.parameters(), ema_model.parameters()):
+                ep.mul_(ema_decay).add_(p.detach(), alpha=1 - ema_decay)
+            for b, eb in zip(model.buffers(), ema_model.buffers()):
+                eb.copy_(b)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     best_iou = 0.0
@@ -342,8 +408,8 @@ def main() -> int:
         model.train()
         t0 = time.time()
         tot_loss, n = 0.0, 0
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for x, y, s in train_loader:
+            x, y, s = x.to(device), y.to(device), s.to(device)
             opt.zero_grad()
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 # channel weights: empty channels (target all-zero) are
@@ -351,7 +417,17 @@ def main() -> int:
                 # higher curve channels empty (4/5-curve charts are rarer
                 # in the training distribution)
                 w = (y.sum(dim=(2, 3)) > 0).float() * 0.7 + 0.3
-                loss = (bce_dice_loss(model(x), y) * w).mean()
+                logit = model(x)
+                loss = (bce_dice_loss(logit, y) * w).mean()
+                # skeleton-recall term (clDice family): penalize missing the
+                # GT skeleton pixels -- directly targets dash/gap/jump
+                # failures on thin structures; only needs the GT skeleton.
+                if s.sum() > 0:
+                    prob = torch.sigmoid(logit)
+                    num = (prob * s).sum(dim=(1, 2, 3))
+                    den = s.sum(dim=(1, 2, 3)) + 1e-6
+                    skel_recall = (num / den).mean()
+                    loss = loss + 0.5 * (1.0 - skel_recall)
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.step(opt)
@@ -359,6 +435,7 @@ def main() -> int:
             else:
                 loss.backward()
                 opt.step()
+            _ema_update()
             tot_loss += loss.item() * len(x)
             n += len(x)
         sched.step()
@@ -367,9 +444,9 @@ def main() -> int:
         v_dice = v_iou = 0.0
         if len(val_loader):
             with torch.no_grad():
-                for x, y in val_loader:
+                for x, y, s in val_loader:
                     x, y = x.to(device), y.to(device)
-                    prob = torch.sigmoid(model(x))
+                    prob = torch.sigmoid((ema_model or model)(x))
                     d, i = dice_iou(prob, y)
                     v_dice += d * len(x)
                     v_iou += i * len(x)
@@ -384,9 +461,10 @@ def main() -> int:
 
         if v_iou > best_iou:
             best_iou = v_iou
-            torch.save({"state_dict": model.state_dict(), "epoch": epoch,
-                        "val_iou": v_iou, "val_dice": v_dice}, args.out)
-            print(f"  -> saved {args.out} (val_iou={v_iou:.4f})")
+            torch.save({"state_dict": (ema_model or model).state_dict(),
+                        "epoch": epoch, "val_iou": v_iou, "val_dice": v_dice,
+                        "ema_decay": ema_decay}, args.out)
+            print(f"  -> saved {args.out} (val_iou={v_iou:.4f}, ema)")
 
     print(f"done. best val_iou = {best_iou:.4f} -> {args.out}")
     return 0
