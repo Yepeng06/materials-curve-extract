@@ -1,0 +1,22 @@
+Phase C root cause: training masks rebuilt with the evaluator's exact axis path
+
+train_segmentation_multi._fit_axis_from_labels mis-judged log axes on
+~25% of training images: its bottom-label filter (c[1] < img_h - 85)
+excluded the lowest y tick label (e.g. 0.001@527px on a 600px chart),
+so the surviving sequence 0.1/1/10 had ratio 100 (not >100) and was
+fitted LINEAR while the evaluator (read_ticks + build_axes, keeping
+the bottom label) judged LOG -- a 100+px target/eval mismatch on log
+axes (verified: 20/20 log-axis val_multi masks had >8000px diff).
+This explains the systematic-bias failures (all 4 curves of a chart
+shifted -1.4%) and the training plateau (512c->512d no gain: more
+epochs only consolidate the wrong target).
+
+Fix: ChartDataset builds axes through the SAME code path as the
+evaluator (detect_structure -> read_ticks -> build_axes) and rebuilds
+instance masks via value_to_pixel (12ms/img, cached once per image;
+legacy polyfit kept as fallback). Verified: 240/240 val_multi mask
+channels coincide with GT curve pixels (>=95% within 2px); pytest 106.
+Also: research expansion in C_DESIGN (LineFormer 6a/6b, ChartZero GOI
+loss, clDice/SRL, Steger, EpiCurveBench ERP matching) + diagnostic
+scripts (eval_multi_diag, diag_error_pattern, diag_pixel_bias,
+diag_prob_peak, diag_mapping_consistency).
