@@ -151,7 +151,7 @@ function renderResultCard(data) {
         </td></tr>` : ''}
         <tr><td>提取耗时</td><td>${data.elapsed_s}s</td></tr>
         <tr><td>OCR 后端</td><td>${data.ocr === "paddle" ? "真实识别（PaddleOCR）" : "标准答案（stub）"}</td></tr>
-        <tr><td>分割模型</td><td>${data.segmenter === "unet" ? "深度学习 U-Net" : "经典 CV"}</td></tr>
+        <tr><td>分割模型</td><td>${data.segmenter === "unet" ? "深度学习 U-Net" : data.segmenter === "multi_unet" ? "多曲线 U-Net" : "经典 CV"}</td></tr>
       </table>
       <div class="downloads">
         <a class="btn small" href="${data.downloads.csv}" download="${data.filename.replace(/\.[^.]+$/, "")}_curves.csv">⬇ CSV</a>

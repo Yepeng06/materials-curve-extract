@@ -97,14 +97,27 @@ def _get_extractor(ocr: str, segmenter: str) -> Extractor:
     extractor = Extractor(ocr_backend=ocr, segmenter=segmenter)
     if segmenter == "unet":
         with _segmenter_lock:
-            key = (extractor.cfg.get("unet_checkpoint"),
+            key = ("unet",
+                   extractor.cfg.get("unet_checkpoint"),
                    int(extractor.cfg.get("unet_size", 512)))
             if key not in _segmenter_cache:
                 from mci.pipeline.segmenter import UNetSegmenter
 
                 _segmenter_cache[key] = UNetSegmenter(
-                    checkpoint=key[0], size=key[1])
+                    checkpoint=key[1], size=key[2])
         extractor._segmenter = _segmenter_cache[key]  # 复用已加载模型
+    elif segmenter == "multi_unet":
+        with _segmenter_lock:
+            key = ("multi",
+                   extractor.cfg.get("multi_unet_checkpoint",
+                                     "models/checkpoints/unet_multi_curve_evalfix.pt"),
+                   int(extractor.cfg.get("unet_size", 512)))
+            if key not in _segmenter_cache:
+                from mci.pipeline.segmenter import MultiUNetSegmenter
+
+                _segmenter_cache[key] = MultiUNetSegmenter(
+                    checkpoint=key[1], size=key[2])
+        extractor._segmenter = _segmenter_cache[key]
     return extractor
 
 
@@ -240,8 +253,8 @@ def extract(
 ):
     if ocr not in ("stub", "paddle"):
         raise HTTPException(400, "ocr 参数须为 stub 或 paddle")
-    if segmenter not in ("unet", "cv"):
-        raise HTTPException(400, "segmenter 参数须为 unet 或 cv")
+    if segmenter not in ("unet", "cv", "multi_unet"):
+        raise HTTPException(400, "segmenter 参数须为 unet/cv/multi_unet")
 
     suffix = Path(file.filename or "chart.png").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -269,8 +282,8 @@ def extract_example(
     """示例图专用：直接使用数据目录原图（GT 侧车天然存在，stub 可用）。"""
     if ocr not in ("stub", "paddle"):
         raise HTTPException(400, "ocr 参数须为 stub 或 paddle")
-    if segmenter not in ("unet", "cv"):
-        raise HTTPException(400, "segmenter 参数须为 unet 或 cv")
+    if segmenter not in ("unet", "cv", "multi_unet"):
+        raise HTTPException(400, "segmenter 参数须为 unet/cv/multi_unet")
     src = None
     for base_dir, _label in EXAMPLE_GLOBS:
         if base_dir.name != group:
