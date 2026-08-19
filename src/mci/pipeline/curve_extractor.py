@@ -612,6 +612,11 @@ def extract_curves_multi(    image_bgr: np.ndarray,
         mask01 = _filter_mask_fragments(mask01, plot_w, plot_h)
         if int(mask01.sum()) < 16:
             continue
+        # ghost-channel suppression (LineFormer over-segmentation fix):
+        # tiny channels (legend glyphs / curve fragments) are dropped.
+        min_area = int(cfg.get("multi_min_area", 0))
+        if min_area > 0 and int(mask01.sum()) < min_area:
+            continue
         skel = skeletonize(mask01.astype(bool)).astype(np.uint8)
         chain = _trace_chain(skel)
         if chain is not None:
