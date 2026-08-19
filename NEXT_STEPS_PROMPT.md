@@ -1,240 +1,177 @@
-# 下一步工作 Prompt — materials-curve-intel 项目（新对话交接版 v4 · 全局总结）
+# 下一步工作 Prompt — materials-curve-intel 项目（新对话交接版 v5 · 全局总结）
 
 > AI 你好，这是项目阶段性交接文件。**你必须全文阅读后再开始工作。**
 > 本文件可修改（不同于上级 Prompt.md）。
-> 交接日期：2026-08-18（B-5a 完成 paddle 99%；Phase C 多曲线分割首轮完成召回 67.7%）
-> **用户强调：无论何时都要先做深入研究（论文/社区文档/官方文档）再设计动手**。
+> 交接日期：2026-08-19（**Phase C 根因突破 + 修复重训暂停在 epoch 4**）
+> **用户强调：无论何时都要先做深入研究（论文/社区文档/官方文档）再设计动手**，
+> 研究充分后选择最合适的方法，方案/计划必须经过充分调研。
 > **真实文献曲线图仍在收集中**（Phase A.3 用户任务，到位后优先 B-5 真实图验证）。
 
-## 〇.5、全局现状总结（2026-08-18 交接重点，先读这一节）
+## 〇.5、全局现状总结（2026-08-19 交接重点，先读这一节）
 
 ### 实现了什么（按时间线）
 | 阶段 | 内容 | 状态 |
 |------|------|------|
 | Phase A | 合成数据工厂、U-Net 512 曲线分割（val_iou 0.8166）、单曲线提取管线（结构→刻度→映射→分割→追踪→导出）、Web 演示 | ✅ |
-| B-1 | 刻度 OCR 加固（条带放大/整图兜底/多尺度 tick 检测/RANSAC/端点锚定） | ✅ 刻度识别率 x 97.2%/y 96.3% |
-| B-2 | 标题/轴标题/单位识别（title_reader）+ 竖排 y 标题 CW 旋转 OCR | ✅ 检出率 100% |
-| B-3 | 三信号坐标判型（值序列+像素间距+外部先验） | ✅ 轴类型 x/y 96% |
-| B-4 | YOLOv8-nano 结构检测（6 类，mAP50 0.942） | ✅ 可切换 structure_backend: cv|yolo |
-| **B-5a** | OCR 刻度值误读增强（10^N 上标家族消歧/低分过滤/4x 重 OCR/标签中心像素/缺刻度补全） | ✅ **paddle 达标率 70%→99%** |
-| **Phase C 首轮** | 多曲线实例分割（U-Net K=6 通道）、CSV 重建实例掩码、多曲线提取/评估管线 | 🟡 召回 67.7%（目标 95%） |
-| **C-2 根因修复** | 训练目标与评估基准统一（同代码路径重建掩码）+ EMA + 骨架召回损失 + 6a/6b 双口径 + 虚检抑制 | 🔄 **重训中（2026-08-19）** |
+| B-1~B-4 | 刻度 OCR 加固、标题/轴标题/单位识别、三信号坐标判型、YOLOv8n 结构检测 | ✅（详见历史） |
+| B-5a | OCR 刻度值误读增强（10^N 上标消歧/标签中心像素等） | ✅ **paddle 达标率 70%→99%** |
+| Phase C 首轮 | 多曲线实例分割（U-Net K=6）、CSV 重建掩码、多曲线提取/评估管线 | 🟡 召回 67.7%（目标 95%） |
+| **C-2 根因修复（本会话）** | **发现并修复「训练目标 ≠ 评估基准」根因**：训练侧 _fit_axis_from_labels 底部标签过滤（c[1]<img_h-85）排除最底部 y 刻度 → **y 轴 25.5%（904/3548）+ x 轴 1.8%（65/3680）训练图把 log 轴误判 linear**，log 轴上训练掩码错位 100+px。修复：训练改走与评估完全相同的代码路径（detect_structure→read_ticks→build_axes→value_to_pixel）重建掩码 | ✅ 已修复并验证（240/240 通道对齐；pytest 110/110） |
+| **C-2 重训验证** | 修复目标 + EMA(0.999) + 骨架召回损失（clDice 族），25 epoch 从 512c 续训 | ⏸ **暂停在 epoch 4：val_iou 0.7345**（旧 512c 仅 0.4993，+47%）；checkpoint 已保存可用 |
+| **Phase D 材料** | 500 张多曲线 + 500 张单曲线验收集（独立 seed 20260819） | ✅ 已生成（data/eval_phased_500 / _single） |
 
 ### 做得好（关键成功点）
-1. **B-5a 三连突破**：候选解析+序列消歧（'100'=10⁰ 等）→ 86%；**标签中心像素**（CV mark 检测顶部漂移 +9.5px 是隐蔽根因）→ **99%**；pytest 106/106、stub 零回退
-2. **Phase C 关键洞察链**：灰度聚类掩码不可靠（虚线/抗锯齿）→ curves_px 折线（16 稀疏点漂移）→ **CSV 重建掩码**（160 密集点经刻度标签映射，训练目标=评估基准，验证 0.4px）→ 召回 48%→67%
-3. 严谨实验纪律：每步 pytest + 回归 + 诊断（12 张最差图逐刻度分析、失败分布量化、对照实验证明 512 是精度关键）
+1. **B-5a 三连突破**：候选解析+序列消歧 → 86%；**标签中心像素**（CV mark 顶部漂移 +9.5px 隐蔽根因）→ **99%**；pytest 全绿、stub 零回退
+2. **Phase C 关键洞察链**：灰度聚类不可靠 → curves_px 折线漂移 → **CSV 重建掩码**（训练目标=评估基准）→ 48%→67%；**本会话再进一步：连轴映射代码路径都必须与评估一致**（25.5% log 轴图因标签过滤误判 linear，掩码错位 100+px）
+3. **根因实证闭环**：全数据核查（904/3548 不一致）→ 像素级诊断（模型概率峰值 +1~2px、log 轴 1px≈2% rel）→ 修复后验证（240/240 通道对齐、epoch 1 val_iou 0.676→epoch 4 0.7345 远超旧模型）
+4. **三路并行深度调研**（LineFormer 6a/6b、ChartZero GOI、clDice/SRL、EpiCurveBench、Graph-FINDER、STU-Net、Focal Tversky 等 25+ 来源），方案按「证据强度 × 成本」矩阵决策
+5. 严谨实验纪律：每步 pytest + 回归 + 诊断（本会话新增 5 个诊断脚本：逐曲线失败分类/错误模式/像素偏差/概率峰值/映射一致性）
 
 ### 不够理想 / 问题在哪
 | 问题 | 根因 | 现状 |
 |------|------|------|
-| Phase C 召回 67.7% vs 目标 95% | **【2026-08-19 根因突破】训练目标与评估基准不一致**：训练侧 _fit_axis_from_labels 的底部标签过滤（c[1]<img_h-85）排除最底部 y 刻度 → **25.5% y 轴（904/3548）+1.8% x 轴训练图把 log 轴误判 linear**，log 轴上掩码错位 100+px → 训练平台化（512c→512d 无增益实为巩固错误目标）、systematic_bias（同图 4 曲线同向偏 -1.4%）、log 轴图全失败 | 已修复（训练改用与评估完全相同的 detect_structure→read_ticks→build_axes 路径重建掩码），**重训验证中** |
-| 失败分布（修复前） | 1-2% 边缘 83 条（log 轴 1px≈2% rel + 模型概率峰值 +1~2px 偏移）；2-5% 47 条；>5% local_spike 41 条（尾部集中：decile 8-9 占 68%，曲线汇聚处通道归属混淆）；虚检 19 图（pred=5，面积 51-625px 碎片） | 修复后预期：systematic_bias/边缘类大幅改善；local_spike 待新模型复测 |
-| 单曲线召回 91.7%（5/60 失败） | 多任务 6 通道共享编码器精度略低于专用单曲线模型（单曲线模型 100%） | 可接受（单曲线场景可用单曲线模型） |
-| 真实图验证未开始 | 用户真实论文图仍在收集 | 待用户 |
-| 多曲线 Web 展示未接 | Phase C 未达标 | 后续 |
+| **重训未跑完** | 用户暂停（epoch 4/25） | checkpoint 已保存（val_iou 0.7345，best-iou 保存策略）；**下一步优先：续训或直接评估该 checkpoint** |
+| Phase C 召回 67.7%（修复前基线） | **根因已定位**：训练目标与评估基准不一致（见上）；叠加失败分布：1-2% 边缘 83 条（log 轴 1px≈2% rel + 概率峰值 +1~2px）、2-5% 47 条、>5% local_spike 41 条（尾部集中 decile 8-9 占 68%，**曲线交叉/靠近处 argmax 互斥丢弃通道像素**——实验证实交叉重叠区占图内墨迹 10-32%）、虚检 19 图（pred=5） | 修复已落地，重训验证中；local_spike 待新模型复测后决定 Hungarian 分支配对 |
+| 6b 口径虚检惩罚 | 过分割/幽灵通道（面积 51-625px 碎片，部分与真曲线同量级） | min_area 过滤已实现（曲线数准确率 47/60→57/60，6b +1.5pp，6a -0.8pp 需谨慎调参） |
+| 单曲线召回 91.7%（5/60 失败） | 4/5 失败图是 log 轴，且训练侧旧 fit 误判（img_0036 y=fit None→掩码全零；img_0037/0051 y=linear vs log）——**属同一根因** | 修复后预期单曲线也回升，待重训验证 |
+| 真实图验证未开始 | 用户真实论文图仍在收集 | 待用户（图到位后 --ocr paddle 评估） |
 
-### 解决办法（候选路径，按性价比）
-1. **更大模型**：UNet base 64→96（8GB 显存 batch 4，~2x 训练时间）——针对边缘型
-2. **更多曲线形态训练数据**：扩展 dataset_builder 模板（陡峭尾部/交叉场景）
-3. **图例颜色辅助归属**：真实图有图例时用颜色/标签关联（黑白合成图无效，真实图受益）
-4. **推理侧**：阈值 0.3 + 跳变截断已落地（+1%）；细化半径 3 最优（69.2%）；语义细化失败（单曲线模型不支持多曲线语义）
-5. **验收对齐**：与用户确认 95% 召回的口径（合成集 vs 真实图；含曲线数错误惩罚否）
+### 解决办法（候选路径，按证据×成本，2026-08-19 调研后排序）
+| 方案 | 证据 | 成本 | 状态 |
+|------|------|------|------|
+| A. 训练目标修复（统一映射路径） | 根因实证（904 例不一致） | 已实施 | ✅ 重训验证中（epoch 4 已 +47% val_iou） |
+| B. EMA + 骨架召回损失（clDice 族） | clDice/SRL（ECCV24）细长结构强证据 | 低（已实施） | ✅ 已随重训 |
+| C. 交叉分支配对 + Hungarian（纯后处理） | 对应 local_spike 41 条；LineFormer/追踪文献 | 中 | 📋 待新模型复测后实现 |
+| D. 虚检抑制（min_area） | LineFormer 社区实证（过检 +62.3%→微调 -52.7pct） | 低（已实现） | 📋 新模型上精细调参后默认开 |
+| E. GOI 损失（嵌入头+正交+merge） | ChartZero 消融（IoU 0.75→0.82） | 高（改架构） | 📋 观察 A+B 结果后决定 |
+| F. CoordConv / GroupNorm | ChartZero 消融（+0.06 IoU） | 低 | 📋 随 E 或独立验证 |
+| G. 6a/6b 双口径 + 薄线子集指标 | LineFormer/EpiCurveBench | 低（已实现 6a/6b） | ✅ eval_multi_6ab.py |
+| H. 更大模型 base 64→96/128 / 分辨率 768-1024 | STU-Net（2.1M→8.4M 真实收益）；细线任务分辨率首要杠杆 | 高（本地 8GB 受限；可租 GPU ~¥2-10/次） | 📋 本地验证后如需加速再租 |
+| I. 图例颜色辅助归属 / VLM 语义先验 | WebPlotDigitizer/PlotPick（VLM 召回 88-96%） | 中 | 📋 真实图阶段优先 |
+| J. 曲线形态模板扩展（陡峭尾部/交叉） | 合成多样性>数量（域随机化经典证据） | 中 | 📋 若重训后仍不足 |
 
-### 后续计划（优先级，2026-08-19 更新）
-1. **【训练中】C-2 根因修复重训**（evalfix：统一训练/评估映射 + EMA + 骨架召回损失，25 epoch，已启动 ~3-5h）→ 训后跑 eval_multi_6ab 对比 6a/6b；预期 systematic_bias 类大幅改善
-2. **【重训后评估】失败复测**：eval_multi_diag + diag_error_pattern 复跑，看 local_spike/边缘类是否随修复改善；决定是否做 Hungarian 交叉分支配对（研究建议最高杠杆纯后处理）
-3. **【可选】虚检抑制落地**：multi_min_area 已实现（曲线数 47/60→57/60，6b +1.5pp，6a -0.8pp），新模型上精细调参后默认开启
+### 后续计划（优先级）
+1. **【首选】恢复 C-2 重训**（25 epoch 跑完或至少 15+）→ `eval_multi_6ab.py` 对比 6a/6b vs 基线 6a=0.6767/6b=0.6534；预期 systematic_bias/边缘/单曲线失败大幅改善
+2. **【重训后】失败复测**：eval_multi_diag + diag_error_pattern 复跑 → 决定 C（Hungarian 分支配对）/D（min_area 调参）
+3. **【评估基建】Phase D 验收**：在 500+500 验收集上跑 evaluate.py（单曲线）+ eval_multi_6ab（多曲线），产出验收报告与 ablation 表（PHASE_D_ACCEPTANCE.md 已列矩阵 A1-A9）
 4. **【依赖用户】B-5 真实图验证**：图到位后 --ocr paddle 评估 + gold 标注 RMSE
-5. **【无需训练】5.2 多曲线评估基建**（legend_matcher 增强、evaluate 多曲线模式）——Phase C 验收需要
-6. **【无需训练】5.4 Phase D 验收材料**（500 张独立 seed 验收集 + ablation 报告）
-7. **【需训练，先请示】5.6 B-4 增强**（x_axis_line mAP 0.749 弱）或 OCR 微调
+5. **【可选】Web 多曲线展示**（multi_unet 选项已接入前后端，待新模型默认值生效）
+6. **【需训练，先请示】E/F/H/J**（GOI/CoordConv/更大模型/模板扩展）——本地 8GB 或租 GPU
 
 ### 技术栈（现状）
-- Python 3.11（Anaconda env **mci**）、PyTorch 2.13+cu126（GPU）、ultralytics 8.4.115（YOLOv8n）、
-  PaddleOCR 3.7.0（CPU）、numpy 1.26.4（固定）、OpenCV/scikit-image/scipy、FastAPI + 原生前端
-- 模型：U-Net 单曲线（unet_curve.pt 512，val_iou 0.8166）+ **多曲线 K=6（unet_multi_curve_512c.pt 512，val_iou 0.4993@CSV 目标）** + YOLOv8n 结构检测
+- Python 3.11（Anaconda env **mci**）、PyTorch 2.13+cu126（GPU）、ultralytics 8.4.115、PaddleOCR 3.7.0（CPU）、numpy 1.26.4（固定）、OpenCV/scikit-image/scipy、FastAPI + 原生前端
+- 模型：U-Net 单曲线（unet_curve.pt 512，val_iou 0.8166）+ **多曲线 K=6**：**unet_multi_curve_evalfix.pt（epoch 4，val_iou 0.7345，训练中暂停，当前最佳）**、历史 512c（0.4993）/512d + YOLOv8n 结构检测
 - 管线：extractor 单一入口，segmenter: cv|unet|multi_unet；structure_backend: cv|yolo；ocr: stub|paddle
 
 ## 〇、先读这些（每次会话开始必读）
 
-1. **`F:\CODE\New\Prompt.md`**（只读，禁止修改）— 项目唯一权威指导文件：竞赛目标（一等奖）、
-   六大要求（前沿技术/效果第一/先请示/持怀疑态度调研/分工）、验收标准（RMSE ≤1% 满量程、
-   坐标类型 ≥98%、单图 <5s GPU、多曲线召回 ≥95%）、技术路线（YOLOv8-nano + PaddleOCR + U-Net + 坐标映射）。
+1. **`F:\CODE\New\Prompt.md`**（只读，禁止修改）— 项目唯一权威指导文件（竞赛一等奖目标、六大要求、验收标准）。
 2. **`F:\CODE\New\baseline\README.md`** — baseline 完整架构/用法/评估/限制。
-3. **`F:\CODE\New\baseline\AXIS_TEXT_RESEARCH.md`** — 坐标轴文字/数字鲁棒识别调研与设计（B-1~B-3 已实施）。
-4. **`F:\CODE\New\baseline\B5A_DESIGN.md`** — B-5a 设计+实施记录（10^N 家族/标签中心像素等）。
-5. **`F:\CODE\New\baseline\C_DESIGN.md`** — Phase C 多曲线分割设计+四轮训练记录+失败分析。
-6. **`F:\CODE\New\baseline\TESTING_GUIDE.md`** — 用户实操测试指南。
-7. **`F:\CODE\New\baseline\web\README.md`** — Web 演示系统说明。
-8. 开始工作前：`cd F:\CODE\New\baseline && git log --oneline -30 && git status`。
+3. **`F:\CODE\New\baseline\C_DESIGN.md`** — Phase C 设计+四轮训练记录+失败分析（已补充根因与修复记录）。
+4. **`F:\CODE\New\baseline\C_RESEARCH.md`** — **2026-08-19 三路并行调研汇总**（25+ 来源：LineFormer/ChartZero/GOI/clDice/EpiCurveBench/Graph-FINDER/STU-Net/Focal Tversky 等，含证据×成本方案矩阵）。
+5. **`F:\CODE\New\baseline\C_FIX_DESIGN.md`** — 根因修复设计+重训方案+后续候选。
+6. **`F:\CODE\New\baseline\PHASE_D_ACCEPTANCE.md`** — Phase D 验收材料清单（验收集/评估命令/ablation 矩阵）。
+7. **`F:\CODE\New\baseline\AXIS_TEXT_RESEARCH.md` / `B5A_DESIGN.md` / `TESTING_GUIDE.md` / `web\README.md`** — 历史设计/测试/Web 文档。
+8. 开始工作前：`cd F:\CODE\New\baseline && git log --oneline -15 && git status`。
 
 ## 一、项目背景与验收标准（摘要）
 
 **主题：** 材料科学图像曲线智能识别与解析（自动从曲线图提取数据 → 结构化输出）。
-**验收：** 曲线数据点 RMSE ≤ 坐标轴满量程 1%；坐标类型判断准确率 ≥98%；单张 <5s（GPU）；
-多曲线召回 ≥95%（Phase C）。
-**验收方式：** ① dataset-platform 独立 seed 500 张测试图；② ≥50 张真实论文蠕变图人工标注对比；
-③ 每个模块 ablation。
+**验收：** 曲线数据点 RMSE ≤ 坐标轴满量程 1%；坐标类型判断准确率 ≥98%；单张 <5s（GPU）；多曲线召回 ≥95%（Phase C）。
+**验收方式：** ① dataset-platform 独立 seed 500 张测试图（已生成 500 多曲线 + 500 单曲线）；② ≥50 张真实论文蠕变图人工标注对比；③ 每个模块 ablation。
 **首批领域：** 蠕变曲线（做透后再泛化）。
 
 ## 二、环境与仓库状态
 
-**环境：** Anaconda 虚拟环境 **`mci`**（Python 3.11，RTX 4060 8GB / CUDA 12.6）
-- torch 2.13.0+cu126（GPU ✓）、ultralytics 8.4.115（YOLOv8n 检测已训练）
-- paddlepaddle 3.3.1（**CPU 版**）+ paddleocr 3.7.0（真实 OCR ~10-30s/图含整图识别）
-- numpy **必须固定 1.26.4**；fastapi 0.141.1 / uvicorn 0.52.3（Web 已装）
+**环境：** Anaconda 虚拟环境 **`mci`**（Python 3.11，RTX 4060 Laptop 8GB / CUDA 12.6）
+- torch 2.13.0+cu126（GPU ✓）、ultralytics 8.4.115（YOLOv8n）、paddlepaddle 3.3.1（CPU）+ paddleocr 3.7.0
+- numpy **必须固定 1.26.4**；fastapi 0.141.1 / uvicorn 0.52.3
+- **租 GPU 选项（用户已暂缓）**：AutoDL 3090/4090 24GB（¥1.2-2.5/h）可显著加速大模型/高分辨率实验；代码 0.46MB + 数据 923MB 迁移成本低；云端 Linux 无 torch/paddle DLL 冲突
 
-**仓库：** `F:\CODE\New\baseline`（git，master）
-**归档：** `F:\CODE\New\baseline_backup_20260816_bphases`（B 系列完成后备份）
-**数据工厂：** `F:\CLAUDE\NewProject1\materials-curve-dataset-platform`（V0fix-final-2，8 模板；平台仓库零改动）
+**仓库：** `F:\CODE\New\baseline`（git，master；2026-08-19 会话 8 个新 commit）
+**数据工厂：** `F:\CLAUDE\NewProject1\materials-curve-dataset-platform`（V0fix-final-2，平台仓库零改动）
 
 **数据目录（均不入库，gitignore）：**
 | 目录 | 内容 |
 |------|------|
-| `data/synthetic` | 40 张合成测试集（stub 基准 med ≤0.40%/达标 87.5%） |
-| `data/train_platform` | 2000 张平台风格训练集（2-5 曲线，含掩码/CSV/侧车/MCG/YOLO 标签） |
-| `data/train_platform_single` | 600 张单曲线训练集（B-5a/Phase C 补充） |
-| `data/train_platform_4c` / `_5c` | 600 张 4 曲线 / 300 张 5 曲线训练集 |
-| `data/eval_platform` | 100 张单曲线评估集（**paddle 99% 达标**） |
-| `data/val_multi` / `val_single` | 120 张 4 曲线 + 60 张单曲线验证集（Phase C 评估） |
-| `data/eval_*` | 历次评估输出（report.csv/summary.json，对比用） |
-| `data/real_papers/` | 真实论文图收集区（README 已就位，**待用户收集**） |
-| `data/failures/` | 真实失败样本库（fail_001 已恢复） |
+| data/train_platform(+_4c/_5c/_single) | 2000+600+300+600 张训练集（2-5 曲线） |
+| data/val_multi / val_single | 120 张 4 曲线 + 60 张单曲线验证集（Phase C 评估基准） |
+| **data/eval_phased_500 / _single** | **Phase D 验收集（各 500 张，独立 seed 20260819，已生成）** |
+| data/eval_multi_diag_512c | 逐曲线失败诊断（diag.json + error_pattern.json + vis/） |
+| data/real_papers/ | 真实论文图收集区（**待用户**） |
+| data/failures/ | 真实失败样本库 |
 
-**模型检查点（已入库或本地）：**
-- `models/checkpoints/unet_curve.pt` — 单曲线 U-Net 512（val_iou 0.8166，**默认**）
-- `models/checkpoints/unet_multi_curve_512c.pt` — **多曲线 K=6（当前最佳，召回 67.7%）**
-- `models/checkpoints/unet_multi_curve_v3.pt` / `_512.pt` / `_512b.pt` / `_512d.pt` — 历史版本（v3=256、512/512b=折线目标、512d=CSV 目标继续训练无增益）
+**模型检查点（models/checkpoints/）：**
+- `unet_curve.pt` — 单曲线 U-Net 512（val_iou 0.8166，默认）
+- **`unet_multi_curve_evalfix.pt` — 多曲线 K=6，epoch 4，val_iou 0.7345（当前最佳，修复后训练暂停）**
+- `unet_multi_curve_512c.pt`（旧最佳 0.4993）/ `_512d.pt` / `v3.pt` 等历史版本
 - `models/detection/yolo_struct.pt` — YOLOv8n 结构检测（mAP50 0.942）
 
-## 三、当前进展（已完成）
+## 三、当前进展（2026-08-19 会话新增）
 
-### 3.1 提取管线（单曲线/单子图，接口稳定）
-```
-结构检测(CV 或 YOLO 可选) → 刻度OCR(PaddleOCR/Stub 双后端+整图兜底) → 坐标映射
-(三信号判型+RANSAC+端点锚点+缺刻度补全) → 标题/轴标题/单位识别(B-2) → 曲线分割
-(U-Net 512/CV) → 骨架追踪+亚像素细化 → CSV/JSON/overlay 导出
-```
+### 3.1 根因：训练目标与评估基准不一致（本会话最重要发现）
+- 训练侧 `_fit_axis_from_labels` 的 y 标签过滤 `c[1] < img_h-85` 排除最底部 y 刻度（如 0.001@527px，600px 图），剩余序列 0.1/1/10 比值=100 不触发 log 判定（阈值 >100）→ 判 linear；评估侧 `_classify_labels` 保留底部标签 → 判 log。
+- **全数据核查：y 轴不一致 904/3548（25.5%）、x 轴 65/3680（1.8%），全部为 fit=linear vs GT=log**。
+- log 轴上 linear 拟合误差可达 100+px → 25% 训练图掩码系统性错误 → 训练平台化、systematic_bias（同图 4 曲线同向偏 -1.4%）、log 轴图全失败（20/20 掩码差异 >8000px）、单曲线 4/5 失败图同根因（img_0036 训练掩码全零）。
 
-### 3.2 数据与精度（stub 路径基准，不得回退）
-| 评估集 | med | 达标率 |
-|--------|-----|--------|
-| 合成 40 张 | 0.404% | 87.5% |
-| 平台 100 张 | 0.204% | **100%** |
+### 3.2 修复（已实施并验证，git e3a2d79）
+- ChartDataset 改走**与评估完全相同的代码路径**：detect_structure → read_ticks → build_axes → value_to_pixel 重建实例掩码（12ms/图，per-image 缓存；旧 polyfit 保留为 fallback）。
+- 验证：240/240 val_multi 掩码通道与 GT 曲线像素重合 ≥95%（≤2px）；pytest 106/106（后 110/110）。
+- 训练脚本增强：EMA（--ema-decay 0.999）+ 骨架召回损失（GT 骨架预计算缓存，随增强同步）；--init 现在也转移 out 头（K=6 续训不再随机初始化输出层）。
 
-### 3.3 真实 OCR（paddle）路径精度（B-1→B-3→B-5a）
-| 版本 | 达标率 | med | p90 | 轴类型 x/y |
-|------|--------|-----|-----|-----------|
-| 原始（B-1 前） | 24.5% | 0.43% | 39.7% | ~50%/50% |
-| B-1 后 | 48% | 0.14% | 47.8% | 64%/79% |
-| B-3 最终 | 70% | 0.0034% | 0.34% | 96%/96% |
-| **B-5a 最终** | **99%** | **0.25%** | **0.58%** | **100%/100%** |
-- B-5a 关键：10^N 上标误读家族消歧（'100'/'10'/'10-'/'012'/'0-2'/'102.'/'0-1' 等）、
-  低分/非数字文本过滤、4x 条带重 OCR、**标签中心像素**（CV mark 顶部漂移 +9.5px）、
-  缺刻度补全、strict 关联优化——详见 B5A_DESIGN.md
-- 剩余 1 张（img_0060 1.6%）：亚像素级残余，待真实图阶段验证
+### 3.3 重训（暂停在 epoch 4）
+- 命令：train/train_segmentation_multi.py --data-dir 4 个训练目录 --val-dir val_multi,val_single --epochs 25 --batch 8 --size 512 --per-dir-limit 600 --init ...512c.pt --ema-decay 0.999
+- 进度：epoch 1 val_iou 0.6763 → epoch 4 **0.7345**（旧 512c 最终 0.4993，+47%）；约 8-10min/epoch；25 epoch 全程 ~3-4h。**恢复命令见第八节**。
+- 注：曾有一次因 init 未转移 out 头而重启（epoch 1 仅 0.056 被识别并修正）。
 
-### 3.4 Phase C 多曲线实例分割（首轮完成，召回 67.7%）
-- 模型：UNet(K=6 通道) + MultiUNetSegmenter；训练 `train/train_segmentation_multi.py`
-- **实例掩码 = GT CSV 重建**（160 密集点经 labels.json 刻度标签映射；与评估基准一致，
-  验证 0.4px）——灰度聚类、curves_px 折线均已否决（原因见 C_DESIGN.md）
-- 推理：`extract_curves_multi`（阈值 0.3 + 通道 argmax 互斥 + 尾部跳变截断）+
-  extractor `--segmenter multi_unet`；评估 `scripts/eval_multi.py`
-- **结果：召回 67.7%（单曲线 91.7%、多曲线 ~65%），曲线数准确率 92%**（178 张验证集）
-- 失败分类：87 条 1-2% 边缘型 / 61 条 2-5% / 27 条 >5%（归属/追踪）
-- 训练平台化：512c（CSV 目标）66.7% → 512d（+20 epoch）64.1% 无增益
+### 3.4 评估/诊断工具（新增，已入库）
+- `scripts/eval_multi_6ab.py` — LineFormer 式 6a/6b 双口径（6a 纯召回、6b 罚虚检）；基线 6a=0.6767/6b=0.6534
+- `scripts/eval_multi_diag.py` — 逐图/逐曲线 rel_rmse + 失败桶分类 + 模板/形态归因
+- `scripts/diag_error_pattern.py` — 错误模式分类（local_spike 91 / systematic_bias 34 / mixed 39 / partial_trace 3）
+- `scripts/diag_pixel_bias.py` / `diag_prob_peak.py` — 像素级偏差/模型概率峰值偏移（+1~2px）
+- `scripts/diag_mapping_consistency.py` — 训练/评估映射一致性（复现根因核查）
+- `scripts/diag_ghost_*.py` / `exp_argmax_vs_indep.py` — 虚检通道特征与 argmax 互斥实验
 
-### 3.5 测试与质量
-- pytest **106/106**（+test_multi_segmentation.py 4 个）
-- git 历史：A → B-1~B-4 → B-5a×2 → Phase C×3（见 git log）
-- 性能：整图 OCR 共享（29.4s/图 paddle）；PaddleOCR 引擎类级缓存
+### 3.5 其他完成项
+- **legend_matcher 增强**：颜色距离关联曲线标签（annotation-only 不丢曲线）+ 4 测试；extractor 传 image_bgr
+- **Web 多曲线**：segmenter 增加 multi_unet 选项（前后端+配置）；configs/baseline.yaml 增加 multi_* 参数
+- **min_area 虚检抑制**：curve_extractor 增加 multi_min_area 配置（曲线数 47/60→57/60，6b +1.5pp）
+- **Phase D 验收集**：500 多曲线（曲线数 1-5，轴型 4 组合）+ 500 单曲线，独立 seed
+- **argmax 实验结论**：曲线交叉重叠区占图内墨迹 10-32%（img_0007 31.6%），argmax 互斥在交叉处丢弃一个通道的像素 → local_spike 结构性来源；独立阈值多标签平均多保留 2497px/图（LineFormer 方向）
 
-## 四、待用户任务（Phase A.3，用户侧）
-- **收集 ≥50 张真实论文蠕变图**（先 10-15 张）→ `data/real_papers/raw/` + gold 标注；
-  测试中失败图放 `data/failures/` 或发路径
+## 四、测试与质量
+- pytest **110/110**（+4 legend_matcher 测试）
+- 单曲线回归基准（不得回退）：合成 med ≤0.40%/87.5%、平台 100% ≤1%、paddle 99%
+- 多曲线基线：6a=0.6767 / 6b=0.6534 / 曲线数准确率 159/178（512c）
 
-## 四.5、前期研究依据（新对话须复核扩充）
-- 刻度文本/坐标校准：ChartEye（arXiv:2408.16123）、ICDAR CHART-Infographics、
-  PlotQA 文本角色分类；US 专利 20190130614A1 序列校验；WebPlotDigitizer 自动刻度检测；
-  PaddleOCR 多尺度/limit_side_len 陷阱（Discussion #14271）、垂直文本（3693449）
-- 多曲线：**LineFormer**（arXiv:2305.01837 实例分割范式；**6a/6b 双口径评估**、
-  交叉多标签掩码、社区实证过检是召回元凶）、**ChartZero**（arXiv:2605.05820
-  GOI 损失：类内拉近+类间正交+小簇合并，CoordConv）、Socratic Chart
-  （arXiv:2504.09764 掩码细化）、Efficient extraction of experimental data from
-  line charts（Graphical Models 2025，Mamba+掩码引导训练）、AI-ChartParser
-  （CGF 2025）、Graph-FINDER（npj Comput. Mater. 2026）、EpiCurveBench
-  （medRxiv 2025，NLD 配对+ERP 容错距离）、UW InfoVis 2018 颜色映射提取、
-  thu-digitizer（确定性+校验工程化）
-- 细长结构：clDice（arXiv:2003.07311）、Skeleton Recall Loss（ECCV 2024）、
-  Focal Tversky、Boundary Loss、Steger 亚像素脊线、骨架交叉点 Hungarian 分支配对
-- 本阶段经验：**训练目标必须与评估基准一致（不止 CSV 重建，还要同一轴映射代码路径——
-  25.5% log 轴图因训练侧标签过滤误判 linear 而掩码错位 100+px）**；灰度聚类在虚线/
- 抗锯齿下失效；512 分辨率是曲线位置精度关键；单曲线模型不支持多曲线语义分割；
-  纯训练平台化时先查训练目标与评估基准的一致性
+## 五、待用户任务
+- **收集 ≥50 张真实论文蠕变图**（先 10-15 张）→ data/real_papers/raw/ + gold 标注；失败图放 data/failures/ 或发路径
+- **决定重训策略**：恢复 25 epoch 跑完 / 用 epoch 4 checkpoint 直接评估 / 加跑更多 epoch
 
-## 五、下一步计划（按优先级）
+## 六、已知的技术坑（务必先读，含本会话新增）
 
-**执行纪律：** 每项开工前先做 ≥1 轮 web/论文调研复核，设计文档（1 页内）先给用户确认再实现。
-
-### 5.1【已完成】B-5a：OCR 刻度值误读增强（70%→99%）
-
-### 5.5【需训练，先请示】Phase C 突破（召回 67.7%→90%+）
-- 候选①：UNet base 64→96（~2x 训练时间，8GB batch 4）——针对 87 条边缘型
-- 候选②：dataset_builder 扩展曲线形态模板（陡峭尾部/交叉）——训练数据多样性
-- 候选③：图例颜色辅助归属（真实图受益）
-- 候选④：验收口径与用户对齐（真实图 vs 合成；曲线数错误处理）
-- 训练命令（512c 继续）：
-  `$PY train/train_segmentation_multi.py --data-dir data/train_platform,data/train_platform_4c,data/train_platform_5c,data/train_platform_single --val-dir data/val_multi,data/val_single --epochs N --batch 8 --size 512 --per-dir-limit 600 --init models/checkpoints/unet_multi_curve_512c.pt --out models/checkpoints/unet_multi_curve_NEW.pt`
-
-### 5.2【无需训练】多曲线评估基建完善（Phase C 验收需要）
-- legend_matcher 增强（整图 OCR 图例文本 + 颜色映射）；evaluate.py 多曲线模式
-- 多曲线指标：逐曲线 F1/RMSE/召回（eval_multi.py 已有基础版）
-
-### 5.7【依赖用户】B-5 真实图验证
-- 图到位后：`--ocr paddle` 评估（无 labels.json 不能走 stub）；失败图入 data/failures/ 回归
-
-### 5.4【无需训练】Phase D 验收材料
-- 500 张独立 seed 验收集（dataset_builder --num-curves 1 --count 500 --seed <新>）
-- 测试报告整理（B-5a 99%、Phase C 67.7%、ablation 表）
-
-### 5.3【无需训练】Web 演示增强（多曲线展示、失败图导出）
-
-### 5.6【需训练，先请示】其他训练类
-- B-4 增强：x_axis_line 弱（mAP50 0.749）→ 更大 imgsz/更长训练/标签细化
-- OCR 专用模型（PaddleOCR 微调）——Phase 2 独立推理服务（GPU）
-
-## 六、已知的技术坑（务必先读）
-
-1. **Windows DLL 冲突**：torch 与 paddle 同进程互斥（WinError 127）。OCR 用 CPU paddle
-   （enable_mkldnn=False）；PaddleOCRBackend._ensure 先 import torch 再 import paddle。
+1. **Windows DLL 冲突**：torch 与 paddle 同进程互斥（WinError 127）。OCR 用 CPU paddle（enable_mkldnn=False）；PaddleOCRBackend._ensure 先 import torch 再 import paddle。
 2. **numpy 固定 1.26.4**（mci 环境）。
 3. **matplotlib 渲染差异**：GT 像素用 `fig.canvas.buffer_rgba()`，勿用 savefig 反推。
 4. **conda run 偶发插件问题**——用 `F:\anaconda3\envs\mci\python.exe` 直接调用。
-5. **paddle 评估慢**：~30s/图 → 100 张 ~50 分钟；评估期间勿并行 YOLO/U-Net 训练。
-6. **'10N' 上标粘连**（'10²'→'102'）：resolve_values 序列一致性重解析（勿回退 B-5a 的候选消歧）。
-7. **重复刻度**（'200'+'0' 双框）：<3px 去重 + B-5a 10px 双框去重（取高分/有值）。
-8. **像素投票规则**：ratio ≥8 → log（次刻度密度），≤5 → linear，单一等距 abstain。
-9. **竖排 y 轴标题**：matplotlib +90° → ROTATE_90_CLOCKWISE（CCW 读出碎片）。
-10. **YOLO x_axis_line 弱**（mAP50 0.749）：plot_area 底边兜底。
-11. **U-Net 推理分辨率必须等于训练分辨率**（512；`--unet-size N` 切换）。
-12. **评价口径**：rel_rmse 以 GT y 满量程归一；GT 稀疏点不能直接比像素。
-13. **gitignore 陷阱**：runs/ 与 *.pt 已 ignore；data/ 全量不入库。
-14. **glob 过滤**：evaluate/run_baseline 必须过滤 `*_mask.png`。
-15. **PaddleOCR 长条带**：超长条带被 resize 到 max_side_limit 4000 内变形——裁剪要合理。
-16. **Phase C 教训**：① 灰度聚类掩码在虚线/抗锯齿下不可靠；② curves_px 是 16 稀疏点，
-    不等于完整曲线（160+ 点 CSV）；③ 训练目标必须与评估基准一致（CSV 经 labels.json 映射）；
-    ④ 512 是曲线位置精度关键（256 下 3.3px 偏差 → rel 1-2%）；⑤ 多曲线模型不支持单曲线语义
-    分割（语义细化方案失败）；⑥ 纯训练收益会平台化（512c→512d 无增益），及时止损评估。
-17. **512 训练显存**：batch 8 + 6 通道 OK（~8GB）；batch 16 可能 OOM。
+5. **paddle 评估慢**：~30s/图 → 评估期间勿并行 YOLO/U-Net 训练。
+6. **'10N' 上标粘连**：resolve_values 序列一致性重解析（勿回退 B-5a 候选消歧）。
+7. **训练目标必须与评估基准一致（本会话最大教训）**：不仅 CSV 重建掩码，**轴映射代码路径也必须一致**——训练侧任何标签过滤/拟合差异都会造成 log 轴整体错位（25.5% 训练图曾受害）。修改训练数据管线后必跑 scripts/diag_mapping_consistency.py 核查。
+8. **U-Net 推理分辨率必须等于训练分辨率**（512；--unet-size 切换）。
+9. **log 轴 1px≈2% rel 误差**：log 轴图上像素级偏移（模型概率峰值 +1~2px）会被放大为 1-2% 边缘失败。
+10. **曲线交叉/靠近**：argmax 互斥丢弃交叉处一个通道像素（重叠区 10-32% 图内墨迹）→ local_spike；候选修复：独立阈值多标签 + 方向连续性追踪（LineFormer 式）。
+11. **虚检通道**：pred=5 时第 5 通道面积 51-625px（小碎片）或与真曲线同量级（过分割）——min_area 过滤对小碎片有效（6b +1.5pp），过分割需 NMS/IoU 合并。
+12. **训练脚本 init 需转移 out 头**：从 K=6 checkpoint 续训时若丢弃 out 层，输出头随机初始化（epoch 1 val_iou 仅 0.056）；已修复（--init 保留 out.* 权重）。
+13. **PowerShell 重定向缓冲**：`*> log 2>&1` 时 Python print 全缓冲，日志可能 0 字节——监控训练用 checkpoint 时间戳/val_iou 字段，或 python -u。
+14. **gitignore 陷阱**：runs/ 与 *.pt 已 ignore；data/ 全量不入库。
+15. **glob 过滤**：evaluate/run_baseline 必须过滤 `*_mask.png`。
+16. **PaddleOCR 长条带**：超长条带被 resize 到 max_side_limit 4000 内变形——裁剪要合理。
 
 ## 七、工作约定（继承 Prompt.md 六大要求）
 
 - 每次会话开始重读 `Prompt.md` + 本文件 + 相关设计文档 + git log/status；
-- **（用户强调）无论何时先做深入研究再动手**：每项工作开工前 ≥1 轮 web_search/论文/社区/
-  官方文档调研，形成 ≤1 页设计依据，先给用户确认设计再实现；
-- 每步改动跑 `python -m pytest tests -q` 与 `scripts/evaluate.py --ocr stub` 回归，
-  **指标不得回退**（stub 基准：合成 med ≤0.40%/87.5%、平台 ≤1% 达标率 100%）；
+- **（用户强调）无论何时先做深入研究再动手**：每项工作开工前 ≥1 轮 web_search/论文/社区/官方文档调研，形成设计依据（可参考 C_RESEARCH.md 的证据×成本矩阵），先给用户确认设计再实现；
+- 每步改动跑 `python -m pytest tests -q` 与 `scripts/evaluate.py --ocr stub` 回归，**指标不得回退**（stub 基准：合成 med ≤0.40%/87.5%、平台 ≤1% 达标率 100%）；
 - 保持「模块接口稳定、逐步替换实现」；`data/` 不入库（代码例外），模型与训练数据本地；
 - 定期归档：重大里程碑后复制 `baseline` 为 `baseline_backup_<日期>`（含 .git）。
 
@@ -244,34 +181,39 @@
 # 注意：优先用 F:\anaconda3\envs\mci\python.exe（conda run 偶发插件问题）
 PY=F:\anaconda3\envs\mci\python.exe
 
+# 【首选】恢复 C-2 重训（续跑 25 epoch 或更多）
+$PY train/train_segmentation_multi.py --data-dir data/train_platform,data/train_platform_4c,data/train_platform_5c,data/train_platform_single --val-dir data/val_multi,data/val_single --epochs 25 --batch 8 --size 512 --per-dir-limit 600 --init models/checkpoints/unet_multi_curve_512c.pt --out models/checkpoints/unet_multi_curve_evalfix.pt --ema-decay 0.999
+
+# 多曲线评估（6a/6b 双口径，推荐）
+$PY scripts/eval_multi_6ab.py --data-dir data/val_multi,data/val_single --model models/checkpoints/unet_multi_curve_evalfix.pt --out-dir data/eval_multi_6ab_evalfix --size 512
+
+# 失败模式诊断（逐曲线桶分类 / 错误模式 / 像素偏差）
+$PY scripts/eval_multi_diag.py --model models/checkpoints/unet_multi_curve_evalfix.pt --out-dir data/eval_multi_diag_evalfix --size 512
+$PY scripts/diag_error_pattern.py --model models/checkpoints/unet_multi_curve_evalfix.pt
+
+# 单曲线评估（stub 快 / paddle 慢 ~50min/100 张）
+$PY scripts/evaluate.py --data-dir data/eval_phased_500_single --out-dir data/eval_phased_single --ocr stub --segmenter unet
+
+# Phase D 多曲线验收（500 张独立验收集）
+$PY scripts/eval_multi_6ab.py --data-dir data/eval_phased_500 --model models/checkpoints/unet_multi_curve_evalfix.pt --out-dir data/eval_phased_multi --size 512
+
 # Web 演示
 $PY web/app.py                      # http://127.0.0.1:8000
 
-# 单曲线评估（stub=确定性快；paddle=真实 OCR 慢 ~50 分钟/100 张）
-$PY scripts/evaluate.py --data-dir data/synthetic --out-dir data/eval_x --ocr stub --segmenter unet
-$PY scripts/evaluate.py --data-dir data/eval_platform --out-dir data/eval_x --ocr paddle --segmenter unet
-
-# 多曲线训练（512 分辨率，~10min/epoch；--per-dir-limit 600 均衡子集）
-$PY train/train_segmentation_multi.py --data-dir data/train_platform,data/train_platform_4c,data/train_platform_5c,data/train_platform_single --val-dir data/val_multi,data/val_single --epochs 10 --batch 8 --size 512 --per-dir-limit 600 --init models/checkpoints/unet_multi_curve_512c.pt --out models/checkpoints/unet_multi_curve_NEW.pt
-
-# 多曲线评估（召回/逐曲线 RMSE/曲线数；--size 512 必须匹配训练）
-$PY scripts/eval_multi.py --data-dir data/val_multi,data/val_single --model models/checkpoints/unet_multi_curve_512c.pt --out-dir data/eval_multi_x --size 512
-
-# 单图多曲线提取（multi_unet 模式）
-$PY scripts/run_baseline.py --image data/val_multi/img_0000.png --out-dir data/outputs --ocr stub --segmenter multi_unet
-
 # 数据生成
 $PY data/dataset_builder.py --out-dir data/eval_xxx --count 100 --num-curves 1 --seed <新seed>
-$PY data/dataset_builder.py --out-dir data/train_platform --count 2000 --seed 20260815 --yolo
 
 # 测试
-$PY -m pytest tests -q              # 当前 106/106
+$PY -m pytest tests -q              # 当前 110/110
 ```
 
 ## 九、待用户确认/执行的事项
 
 1. **真实论文图收集**（Phase A.3）：≥50 张蠕变图，先 10-15 张 → data/real_papers/raw/；
-2. **Phase C 突破方向确认**：base 96 训练 / 数据模板扩展 / 图例辅助 / 验收口径（5.5）；
-3. **验收口径**：95% 多曲线召回在什么数据集上考核（合成独立 seed？真实图？）；
-4. 收集失败图（Web 上传测试失败）是回归样本的重要来源；
-5. B-5a 剩余 1 张（img_0060）与 Phase C 剩余失败的复测材料已就绪。
+2. **重训策略**：恢复训练至 25 epoch / 用 epoch 4 checkpoint 先评估 / 调整超参后再训；
+3. **验收口径**：95% 多曲线召回在什么数据集上考核（合成独立 seed？真实图？含曲线数错误惩罚否——6a/6b 双口径已备）；
+4. **GPU 租用**（已暂缓）：后续大模型/高分辨率实验可租 AutoDL 4090（¥2-2.5/h，本地 8GB 受限）；
+5. 收集失败图（Web 上传测试失败）是回归样本的重要来源。
+
+> 交接 v5 完成于 2026-08-19。上一版 v4（2026-08-18）见 git 历史。
+> 详细研究依据见 C_RESEARCH.md；根因修复设计见 C_FIX_DESIGN.md；验收材料见 PHASE_D_ACCEPTANCE.md。
