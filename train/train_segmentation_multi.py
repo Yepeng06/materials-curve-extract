@@ -93,7 +93,7 @@ def _px_of(fit, v):
 
 def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
                         base_dir: str, img_size: tuple, k: int = K,
-                        width: int = 3) -> np.ndarray:
+                        width: int = 3, axes: tuple = None) -> np.ndarray:
     """K-channel instance masks rebuilt from the GT CSVs through the
     tick-label mapping (the evaluation basis).
 
@@ -102,10 +102,34 @@ def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
     trained on them drifts from the GT interpolation.  Rebuilding the
     dense curve through the SAME mapping that the evaluator uses makes
     the training target and the acceptance metric consistent.
+
+    ``axes`` = (x_axis, y_axis) built by the SAME code path as the
+    evaluator (detect_structure -> read_ticks -> build_axes).  When
+    None, falls back to the legacy _fit_axis_from_labels polyfit
+    (kept only for backward compatibility / tests).
     """
     w, h = img_size
     out = np.zeros((k, h, w), np.uint8)
     if not curves_json or "curves" not in curves_json:
+        return out
+    if axes is not None:
+        x_axis, y_axis = axes
+        for i, c in enumerate(curves_json["curves"][:k]):
+            csv_path = os.path.join(base_dir, c["csv"])
+            if not os.path.exists(csv_path):
+                continue
+            with open(csv_path, encoding="utf-8") as f:
+                rows = [r for r in csvlib.reader(f) if r and not r[0].startswith("#")]
+            data = np.array([[float(r[0]), float(r[1])] for r in rows[1:]])
+            if len(data) < 2:
+                continue
+            # log-axis NaN guard (same clamp as the legacy _px_of)
+            gx = x_axis.value_to_pixel(np.where(data[:, 0] > 0, data[:, 0], 1e-9))
+            gy = y_axis.value_to_pixel(np.where(data[:, 1] > 0, data[:, 1], 1e-9))
+            pts = np.array([[int(round(x)), int(round(y))] for x, y in zip(gx, gy)],
+                          dtype=np.int32)
+            cv2.polylines(out[i], [pts], False, 255, thickness=width,
+                          lineType=cv2.LINE_AA)
         return out
     fx = _fit_axis_from_labels(labels, "x", h)
     fy = _fit_axis_from_labels(labels, "y", h)
@@ -166,9 +190,37 @@ class ChartDataset(Dataset):
             if os.path.exists(cj_p):
                 with open(cj_p, encoding="utf-8") as f:
                     curves_json = json.load(f)
+            # Phase C fix: build axes with the SAME code path the
+            # evaluator uses (detect_structure -> read_ticks ->
+            # build_axes), so the training mask target is pixel-
+            # consistent with the evaluation basis.  The legacy
+            # _fit_axis_from_labels polyfit mis-judged log axes on
+            # ~25% of training images (bottom y tick label excluded
+            # by the img_h-85 filter -> 0.1/1/10 seen as linear),
+            # teaching the model a systematically wrong target.
+            axes = None
+            try:
+                from mci.pipeline.chart_structure import detect_structure
+                from mci.pipeline.coordinate_mapper import build_axes
+                from mci.pipeline.tick_reader import StubOCRBackend, read_ticks
+                from mci.pipeline.extractor import load_config as _lc
+                from mci.utils import read_image as _ri
+                cfg = _lc()
+                img_bgr = _ri(img_path)
+                structure = detect_structure(img_bgr, cfg)
+                ocr = StubOCRBackend(lab_p)
+                x_ticks, y_ticks = read_ticks(img_bgr, structure, ocr, cfg)
+                x_axis, y_axis = build_axes(
+                    x_ticks, y_ticks,
+                    x_endpoints=(float(structure.y_axis_pixel), float(structure.plot_bbox[2])),
+                    y_endpoints=(float(structure.plot_bbox[1]), float(structure.x_axis_pixel)),
+                )
+                axes = (x_axis, y_axis)
+            except Exception:
+                axes = None  # fall back to legacy fit below
             inst = _meta_instance_masks(meta, labels, curves_json,
                                         os.path.dirname(img_path),
-                                        (img.shape[1], img.shape[0]))
+                                        (img.shape[1], img.shape[0]), axes=axes)
             if self.cache is not None:
                 self.cache[key] = inst
         img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_AREA)

@@ -60,6 +60,25 @@
 （训练目标必须与评估基准一致）；③ 灰度聚类否决。
 **剩余差距**：多曲线归属（曲线靠近处通道混淆）+ 边缘精度；继续训练 +20 epoch
 预计单曲线 →95%、多曲线 →70-75%；归属问题需进一步研究（可能用图例/颜色辅助）。
+
+**根因突破（2026-08-19 会话）**：训练目标与评估基准并非真正一致——
+train_segmentation_multi._fit_axis_from_labels 用「标签中心 polyfit +
+`c[1] < img_h-85` 过滤」重建轴映射，与评估侧（detect_structure + read_ticks +
+build_axes）**轴型判定不一致**：底部 y 刻度标签（如 0.001@527px）被 515px 过滤
+排除后，剩余序列 0.1/1/10 比值=100 不触发 log 判定 → 判 linear；评估侧保留
+底部标签 → 判 log。全数据核查：**y 轴判型不一致 904/3548 (25.5%)、x 轴 65/3680
+（1.8%）**，全部为 fit=linear vs GT=log。log 轴上 linear 拟合误差可达 100+px，
+模型被 25% 的错误目标训练 → 解释：① systematic_bias 类失败（同图 4 曲线同时
+偏 -1.4%）；② 训练平台化（512c→512d 无增益，继续训练只是巩固错误目标）；
+③ log 轴图全部失败（20/20 掩码差异 >8000px）。
+**修复（2026-08-19）**：ChartDataset 改用与评估完全相同的代码路径构建轴映射
+（detect_structure → read_ticks → build_axes → value_to_pixel 重建掩码），
+代码级保证训练目标 ≡ 评估基准；旧 polyfit 保留为 fallback（检测失败时）。
+实测 12ms/图（3500 张 ~42s 一次性缓存），pytest 106/106 通过。
+**诊断工具**：scripts/eval_multi_diag.py（逐图/逐曲线 rel_rmse + 桶分类）、
+scripts/diag_error_pattern.py（错误模式：local_spike 91 / systematic_bias 34 /
+mixed 39 / partial_trace 3）、scripts/diag_pixel_bias.py（像素级偏差）、
+scripts/diag_prob_peak.py（模型概率峰值偏移 +1~2px）。
 **推理调优（2026-08-18）**：多曲线掩码阈值 0.5→0.3（model unsure 尾部如 prob 0.44
 被恢复）+ 链尾部跳变截断（tracer 离开曲线时截断）→ 召回 67.7%（vs 66.7%）。
 失败分类：175 条失败中 87 条 1-2% 边缘型（精度边际）、61 条 2-5%、27 条 >5%
@@ -71,10 +90,30 @@
 模型 val_single 100%），但 512 训练 8GB 显存下 ~1h/epoch，需 6-10 小时。
 **下一步建议**：512 微调完整训练（10 epoch，后台过夜）→ 预期召回 ≥90%。
 
-## 六、研究依据（2026-08-16 复核）
+## 六、研究依据（2026-08-16 复核 / 2026-08-19 扩充）
 - LineFormer（arXiv:2305.01837）：折线图实例分割，逐实例像素回归（HuggingFace 权重
-  t29mato/lineformer-battery-finetuned 可参考）
+  t29mato/lineformer-battery-finetuned 可参考）；交叉像素多标签（Bresenham 3px
+  重叠 GT）+ 匈牙利匹配；6a/6b 双口径评估（6a 只罚漏检、6b 罚虚检）——真实图
+  UB-PMC 6a/6b = 93.1/88.25；社区微调经验：过检 +62.3% → 域内微调后 +9.6%
+- ChartZero（arXiv:2605.05820，2026）：纯合成 10 万图零样本；**GOI 损失**（类内
+  拉近 + 类间全局正交 + 小簇合并 IoU 0.75→0.82，专治交叉碎片）、CoordConv、
+  VLM 掩码式图例匹配、ChartRM 端到端指标 0.921 vs GPT-4o 0.468
 - Socratic Chart（arXiv:2504.09764）：掩码形态学细化（腐蚀/膨胀/高斯模糊）——推理后处理
 - Efficient extraction of experimental data from line charts（Graphical Models 2025）：
-  端到端管线（找轴范围→逐线提取）
-- WebPlotDigitizer：手动选线颜色分离——自动化版本即本方案颜色辅助
+  Mamba 增强 Transformer + 曲线掩码引导训练（+10%），YOLOv9 元素检测 + LSTM 刻度
+  识别，PMC 转换精度 87.91%
+- AI-ChartParser（CGF 2025）：多任务（元素+拐点+曲线）端到端 + 区间-均值数值映射
+- Graph-FINDER（npj Comput. Mater. 2026）：免人工校准多线图数字化，nRMSE 0.018
+- EpiCurveBench（medRxiv 2025）：100 张真实图，ECS/ERP 容错指标 + 虚检不罚/漏检
+  记零的配对协议（最强模型仅 42.9%）——与 LineFormer 6b 口径一致，均提示「虚检
+  惩罚过重会扭曲优化方向」
+- 细长结构损失：clDice（arXiv:2003.07311）、Skeleton Recall Loss（ECCV 2024）、
+  Boundary Loss——压断线/跳线/边界定位；白板笔画评价协议证明标准 IoU 掩盖薄线失败
+- 追踪：Steger 亚像素脊线提取（±0.5px→±0.1px）、骨架度≥3 结点=交叉点 → 切分支 +
+  Hungarian 配对（方向+颜色+置信度代价）、Dijkstra 全局最短路
+- 训练策略：Focal Tversky（小结构 +25.7%）、EMA、copy-paste、STU-Net 宽度+深度
+  联合缩放（base 64→128 是真实收益路径 2.1M→8.4M）、分辨率是细线任务首要杠杆
+- WebPlotDigitizer：手动选线颜色分离——自动化版本即本方案颜色辅助（HSV 聚类图例区
+  得参考色，交叉处按颜色距离重归属）
+- 替代范式（远期）：SpatialEmbedding 判别式 embedding（任意曲线数、交叉天然分离，
+  细线有风险）、Mask2Former 查询式、DETR 式查询（ChartZero 支持任意曲线数）
