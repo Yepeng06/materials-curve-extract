@@ -209,7 +209,8 @@ class Extractor:
 
         # 5. legend matching (baseline no-op)
         t = time.time()
-        curves = match_legends(curves, structure, get_full_boxes(), self.cfg)
+        curves = match_legends(curves, structure, get_full_boxes(), self.cfg,
+                                      image_bgr=image)
         timings["legend"] = time.time() - t
 
         timings["total"] = time.time() - t0
