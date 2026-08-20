@@ -54,6 +54,7 @@ $PY scripts/eval_multi_6ab.py --data-dir data/eval_phased_500 --model models/che
 ## 六、待办（验收前）
 
 - [x] 验收集生成（500 多曲线 + 500 单曲线，独立 seed）
-- [ ] evalfix 训练完成 → 全量评估（A4/A6 主结果）
+- [x] evalfix 训练完成（evalfix_r2，val_iou 0.7636）→ 全量评估进行中（A4/A6 主结果，2026-08-20）
+- [x] A5 方案 C Phase 1 已实现（multi_independent_mask + min_area），val 集 6a/6b = 0.7185/0.7004 超基线
 - [ ] 真实图收集（用户）
 - [ ] A1/A2/A3 复跑记录（B 系列已有历史数据，整理入表）
