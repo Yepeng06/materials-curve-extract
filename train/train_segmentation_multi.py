@@ -338,6 +338,8 @@ def main() -> int:
                     help="cap training pairs PER directory (balanced subset)")
     ap.add_argument("--ema-decay", type=float, default=0.999,
                     help="EMA decay for weight averaging (0 disables)")
+    ap.add_argument("--base", type=int, default=64,
+                    help="UNet base channel count (方案 H: 96/128 need GPU > 8GB)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -377,13 +379,16 @@ def main() -> int:
                               num_workers=0, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
 
-    model = UNet(in_channels=1, base=64, out_channels=K).to(device)
+    model = UNet(in_channels=1, base=args.base, out_channels=K).to(device)
     if args.init:
         ckpt = torch.load(args.init, map_location=device, weights_only=False)
         sd = ckpt["state_dict"]
         # encoder weights transfer; the output head (1 -> K channels) is new
         # when init is a single-curve model, but when init is a K-channel
         # multi model (e.g. continuing 512c) the out head must transfer too.
+        # NOTE: base 96/128 init from base-64 checkpoints only transfers the
+        # shallow layers whose channel counts match (enc1/enc2); deeper ones
+        # are randomly initialized (printed as missing).
         sd = {k: v for k, v in sd.items() if k.startswith("enc") or k.startswith("bottleneck")
               or k.startswith("up") or k.startswith("dec") or k.startswith("out")}
         missing, unexpected = model.load_state_dict(sd, strict=False)
