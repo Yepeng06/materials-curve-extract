@@ -275,7 +275,8 @@ $PY -m pytest tests -q              # 当前 110/110
 - 动机：1-2% 边缘失败桶最大（87 条）；C_RESEARCH「分辨率是细线任务首要杠杆」
 - 命令：--size 768 --batch 8 --init evalfix_r2.pt --out unet_multi_768.pt --epochs 25（显存 17.7GB/24GB）；已修复增强 flip bug 后启动（commit 9f7c66c）
 - 对照计划：768 完成后跑 512-fixed（同修复、同 init）分离分辨率 vs 修复增益
-- 评估：eval_multi_6ab --size 768 对比 6a/6b（当前 512 基线 0.7185/0.7004）
+- **768 结果（完成）**：val_iou 0.7531（loss 0.153 vs 512 的 0.573，修复后目标一致）；评估（--size 768，ind+ma450 配置）：6a=0.6963/6b=0.6861/**曲线数 172/180（历史最高）**
+- 待 512-fixed 对照完成后统一对比；注意后处理参数（min_area/truncate 阈值）是**像素尺度相关**的，768 下等效口径不同
 
 ### 10.4 云端训练命令（开机后直接用）
 ```bash
