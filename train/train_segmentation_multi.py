@@ -270,10 +270,18 @@ def _augment(img: np.ndarray, inst: np.ndarray, skel: np.ndarray = None) -> tupl
     """Augment image + K-channel instance masks (and skeletons) together."""
     size = img.shape[0]
     if random.random() < 0.5:
+        # Horizontal mirror (left-right) of image + K-channel masks.
+        # NOTE: cv2.flip(inst, 2) on a (K,H,W) array is WRONG: at size 512
+        # OpenCV's python binding treats it as a multi-channel image and
+        # flips the HEIGHT axis (vertical mirror, channels kept), so image
+        # and masks were misaligned; at size 768 it crashes outright
+        # (dims>2 assert, channel heuristic cutoff = 512).  Use numpy:
+        # mirror the width axis AND reverse the channel order (channels are
+        # sorted by curve x-start, which reverses under a horizontal flip).
         img = cv2.flip(img, 1)
-        inst = cv2.flip(inst, 2)
+        inst = np.flip(inst, axis=2)[::-1].copy()
         if skel is not None:
-            skel = cv2.flip(skel, 2)
+            skel = np.flip(skel, axis=2)[::-1].copy()
     if random.random() < 0.4:
         g = random.uniform(0.8, 1.25)
         b = random.uniform(-25, 25)

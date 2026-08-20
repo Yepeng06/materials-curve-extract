@@ -158,3 +158,39 @@ def test_truncate_jumps_short_chain_unchanged():
     ch = [(float(i), float(i)) for i in range(30)]  # < min_len + 2
     assert _truncate_jumps(ch) == ch
 
+# ---------------------------------------------------------------------------
+# augmentation flip regression (2026-08-20: cv2.flip on (K,H,W) was a vertical
+# mirror at size 512 and crashed at 768; the fix mirrors width + reverses
+# channel order to stay consistent with the horizontally-mirrored image)
+# ---------------------------------------------------------------------------
+def test_augment_flip_mirrors_masks_with_image():
+    import random
+    from train.train_segmentation_multi import _augment
+
+    rng_vals = iter([0.49, 0.9, 0.9, 0.9, 0.9, 0.9])  # flip ON, others OFF
+    random.random = lambda: next(rng_vals)
+    img = np.full((64, 64), 200, np.uint8)
+    img[10, 10] = 0  # distinctive mark
+    inst = np.zeros((4, 64, 64), np.uint8)
+    inst[0, 10, 10] = 255  # channel 0 holds the mark
+    skel = inst.copy()
+    oi, om, os_ = _augment(img, inst, skel)
+    assert oi[10, 63 - 10] == 0          # image horizontally mirrored
+    assert om[3, 10, 63 - 10] == 255     # mask mirrored + channel reversed (0 -> 3)
+    assert os_[3, 10, 63 - 10] == 255    # skeleton follows the mask
+
+
+def test_augment_no_flip_keeps_inputs():
+    import random
+    from train.train_segmentation_multi import _augment
+
+    rng_vals = iter([0.9, 0.9, 0.9, 0.9, 0.9, 0.9])  # all augs OFF
+    random.random = lambda: next(rng_vals)
+    img = np.full((64, 64), 200, np.uint8)
+    img[10, 10] = 0
+    inst = np.zeros((4, 64, 64), np.uint8)
+    inst[0, 10, 10] = 255
+    oi, om, os_ = _augment(img, inst, inst.copy())
+    assert oi[10, 10] == 0 and om[0, 10, 10] == 255 and os_[0, 10, 10] == 255
+
+
