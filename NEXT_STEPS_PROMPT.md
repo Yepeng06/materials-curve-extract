@@ -3,6 +3,7 @@
 > AI 你好，这是项目阶段性交接文件。**你必须全文阅读后再开始工作。**
 > 本文件可修改（不同于上级 Prompt.md）。
 > 交接日期：2026-08-19（**Phase C 根因突破 + 修复重训暂停在 epoch 4**）
+> 更新：2026-08-20（**重训完成 val_iou 0.7636 + 方案 C Phase 1 实施：6a/6b 全面超基线 + Phase D 验收**）
 > **用户强调：无论何时都要先做深入研究（论文/社区文档/官方文档）再设计动手**，
 > 研究充分后选择最合适的方法，方案/计划必须经过充分调研。
 > **真实文献曲线图仍在收集中**（Phase A.3 用户任务，到位后优先 B-5 真实图验证）。
@@ -60,7 +61,8 @@
 
 ### 技术栈（现状）
 - Python 3.11（Anaconda env **mci**）、PyTorch 2.13+cu126（GPU）、ultralytics 8.4.115、PaddleOCR 3.7.0（CPU）、numpy 1.26.4（固定）、OpenCV/scikit-image/scipy、FastAPI + 原生前端
-- 模型：U-Net 单曲线（unet_curve.pt 512，val_iou 0.8166）+ **多曲线 K=6**：**unet_multi_curve_evalfix.pt（epoch 4，val_iou 0.7345，训练中暂停，当前最佳）**、历史 512c（0.4993）/512d + YOLOv8n 结构检测
+- 模型：U-Net 单曲线（unet_curve.pt 512，val_iou 0.8166）+ **多曲线 K=6**：**unet_multi_curve_evalfix_r2.pt（重训完成，val_iou 0.7636，当前最佳）**、evalfix.pt（epoch 4，0.7345）、历史 512c（0.4993）/512d + YOLOv8n 结构检测
+- **推理配置（2026-08-20 起）**：multi_independent_mask: true（方案 C Phase 1 多标签）+ multi_min_area: 450（虚检抑制）——val 集 6a/6b = 0.7185/0.7004，曲线数 168/180，全面超 512c 基线（0.6741/0.6512）
 - 管线：extractor 单一入口，segmenter: cv|unet|multi_unet；structure_backend: cv|yolo；ocr: stub|paddle
 
 ## 〇、先读这些（每次会话开始必读）
@@ -103,7 +105,8 @@
 
 **模型检查点（models/checkpoints/）：**
 - `unet_curve.pt` — 单曲线 U-Net 512（val_iou 0.8166，默认）
-- **`unet_multi_curve_evalfix.pt` — 多曲线 K=6，epoch 4，val_iou 0.7345（当前最佳，修复后训练暂停）**
+- **`unet_multi_curve_evalfix_r2.pt` — 多曲线 K=6，重训完成（4+21 epoch），val_iou 0.7636（当前最佳）**
+- `unet_multi_curve_evalfix.pt` — epoch 4 暂停点（0.7345，保留为安全基线）
 - `unet_multi_curve_512c.pt`（旧最佳 0.4993）/ `_512d.pt` / `v3.pt` 等历史版本
 - `models/detection/yolo_struct.pt` — YOLOv8n 结构检测（mAP50 0.942）
 
@@ -139,14 +142,41 @@
 - **Phase D 验收集**：500 多曲线（曲线数 1-5，轴型 4 组合）+ 500 单曲线，独立 seed
 - **argmax 实验结论**：曲线交叉重叠区占图内墨迹 10-32%（img_0007 31.6%），argmax 互斥在交叉处丢弃一个通道的像素 → local_spike 结构性来源；独立阈值多标签平均多保留 2497px/图（LineFormer 方向）
 
+### 3.6 2026-08-20 会话：重训完成 + 评估 + 方案 C Phase 1（commit 73fe133 / 51dc66e）
+
+1. **重训完成**：evalfix.pt（epoch 4）续跑 21 epoch（共 25）→ **evalfix_r2.pt，val_iou 0.7636**
+   （+53% vs 512c 0.4993；+4% vs 暂停点 0.7345）。注意：LR 余弦重启造成 epoch 2/7/15
+   val_iou 回落（最低 0.4107，瞬态 EMA 伪影），best-iou 保存策略保证 checkpoint 只升不降；
+   epoch 17-21 连续新高收敛（lr→0）。教训：**从暂停 checkpoint 续训会经历 LR 重启回退，
+   不必干预，EMA + best-iou 兜底**。
+2. **评估发现回归并修复**：evalfix_r2 + argmax 6a/6b = 0.6074/0.5889 < 512c 基线
+   （当前数据重跑 0.6741/0.6512，注意历史基线 n_gt=532 与现在 540 不同口径，须重跑对比）。
+   逐图定位：回归集中在交叉密集区（marker_rich/multi_curve_comparison/three_stage 模板），
+   新模型交叉区双通道高概率 → argmax 互斥更伤（img_0069 列级验证）；29 条转好（log 轴/
+   systematic 修复生效）、61 条转差。
+3. **顺带修复 _truncate_jumps 越界 bug**（陡尾链 IndexError，短路掩盖；新模型 7 图触发）+
+   3 回归测试，pytest 113/113。
+4. **方案 C Phase 1 实施（multi_independent_mask）**：交叉处去 argmax 互斥（LineFormer
+   多标签方向）。val 集：argmax 0.6074/0.5889 → +independent 0.7222/0.6667 →
+   **+min_area450 = 0.7185/0.7004，曲线数 168/180——三项全面超基线**。450-550 min_area
+   结果相同（虚检面积分布有间隙）。
+5. **Phase D 验收**（独立 seed 20260819，500+500）：多曲线 6a=0.7869/6b=0.7133/346/500；
+   单曲线 500/500 全过，rel_rmse 中位 0.18%、p90 0.40%、max 1.77%、≤1% 达标率 99.4%。
+6. **配置更新**：configs/baseline.yaml 默认 multi_unet_checkpoint=evalfix_r2.pt、
+   multi_independent_mask=true、multi_min_area=450（Web 演示自动生效）。
+7. 剩余差距：6a 距 95% 目标仍远（1-5 曲线独立集）；虚检（6b 0.7004）与曲线数准确率
+   （346/500）是主要扣分项；候选：Phase 2 分支配对（浅角交叉）、GOI 损失（E）、
+   min_area 自适应、真实图验证（待用户图）。
+
+
 ## 四、测试与质量
-- pytest **110/110**（+4 legend_matcher 测试）
+- pytest **113/113**（+4 legend_matcher、+3 _truncate_jumps 回归）
 - 单曲线回归基准（不得回退）：合成 med ≤0.40%/87.5%、平台 100% ≤1%、paddle 99%
-- 多曲线基线：6a=0.6767 / 6b=0.6534 / 曲线数准确率 159/178（512c）
+- 多曲线基线（当前数据重跑口径 540 GT）：512c 6a=0.6741/6b=0.6512/161/180；**evalfix_r2+independent+min_area450：6a=0.7185/6b=0.7004/168/180（2026-08-20 最佳）**；Phase D 500 图：6a=0.7869/6b=0.7133/346/500
 
 ## 五、待用户任务
 - **收集 ≥50 张真实论文蠕变图**（先 10-15 张）→ data/real_papers/raw/ + gold 标注；失败图放 data/failures/ 或发路径
-- **决定重训策略**：恢复 25 epoch 跑完 / 用 epoch 4 checkpoint 直接评估 / 加跑更多 epoch
+- ~~决定重训策略~~（2026-08-20 已执行：evalfix epoch 4 续跑 21 epoch 完成，val_iou 0.7636）
 
 ## 六、已知的技术坑（务必先读，含本会话新增）
 

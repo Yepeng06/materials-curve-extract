@@ -18,7 +18,7 @@ y_kind_hint: auto
 segmenter: unet             # cv | unet | multi_unet
 unet_checkpoint: models/checkpoints/unet_curve.pt
 unet_size: 512              # inference resolution (must match training resolution)
-multi_unet_checkpoint: models/checkpoints/unet_multi_curve_evalfix.pt
+multi_unet_checkpoint: models/checkpoints/unet_multi_curve_evalfix_r2.pt
 multi_mask_thr: 0.3         # multi-channel mask threshold
 multi_truncate_jumps: true  # cut chain tails that left the curve
 multi_min_area: 450         # ghost-channel suppression (px; 0 = off)
