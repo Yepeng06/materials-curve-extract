@@ -34,6 +34,59 @@ SIZE = 512
 K = 6  # max curves per chart (train_platform has 2-5)
 
 
+def goi_loss(emb: torch.Tensor, y: torch.Tensor) -> tuple:
+    """GOI (Global Orthogonality Instance) loss — ChartZero-style (方案 E).
+
+    emb: (B, E, H, W) raw per-pixel embeddings (L2-normalized here).
+    y:   (B, K, H, W) 0/1 GT instance masks (overlapping crossing pixels
+         excluded from the pull term — they are the ambiguous pixels the
+         model must decide; the orthogonality term still separates the
+         instances globally).
+
+    Returns (pull, ortho) scalar losses, both empty-instance safe.
+    """
+    B, E, H, W = emb.shape
+    Kc = y.shape[1]
+    emb = torch.nn.functional.normalize(emb, dim=1)  # (B, E, H, W)
+    ysum = y.sum(dim=1)                      # (B, H, W) instance count per pixel
+    valid = (ysum > 0) & ~(ysum > 1)         # non-empty, non-overlap pixels
+    labels = y.argmax(dim=1)                 # (B, H, W) instance label
+
+    pull_num = torch.zeros((), device=emb.device)
+    pull_den = torch.zeros((), device=emb.device)
+    ortho_terms = []
+    for b in range(B):
+        cnts = []
+        ctrs = []
+        for k in range(Kc):
+            m = y[b, k] > 0
+            cnt = int(m.sum().item())
+            cnts.append(cnt)
+            if cnt > 0:
+                c = emb[b, :, m].mean(dim=1)          # (E,)
+                ctrs.append(torch.nn.functional.normalize(c, dim=0))
+            else:
+                ctrs.append(torch.zeros(E, device=emb.device))
+        # pull over valid pixels of this sample
+        m_valid = valid[b]
+        if bool(m_valid.any()):
+            lab = labels[b][m_valid]                   # (N,)
+            px = emb[b, :, m_valid]                    # (E, N)
+            cstack = torch.stack(ctrs, dim=1)          # (E, K)
+            cos = (px * cstack[:, lab]).sum(dim=0)     # (N,)
+            pull_num = pull_num + (1.0 - cos).sum()
+            pull_den = pull_den + float(lab.numel())
+        for i in range(Kc):
+            for j in range(i + 1, Kc):
+                if cnts[i] > 0 and cnts[j] > 0:
+                    d = float((ctrs[i] * ctrs[j]).sum().item())
+                    ortho_terms.append(d * d)
+    pull = pull_num / pull_den.clamp(min=1e-6)
+    ortho = (torch.tensor(ortho_terms, device=emb.device).mean()
+             if ortho_terms else torch.zeros((), device=emb.device))
+    return pull, ortho
+
+
 def _list_pairs(data_dir: str):
     pairs = []
     for d in data_dir.split(","):
@@ -340,6 +393,12 @@ def main() -> int:
                     help="EMA decay for weight averaging (0 disables)")
     ap.add_argument("--base", type=int, default=64,
                     help="UNet base channel count (方案 H: 96/128 need GPU > 8GB)")
+    ap.add_argument("--embed-dim", type=int, default=16,
+                    help="GOI embedding dimension (方案 E; 0 disables the head)")
+    ap.add_argument("--goi-weight", type=float, default=0.1,
+                    help="GOI intra-class pull loss weight")
+    ap.add_argument("--goi-ortho", type=float, default=0.1,
+                    help="GOI inter-class orthogonality loss weight")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -379,7 +438,8 @@ def main() -> int:
                               num_workers=0, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
 
-    model = UNet(in_channels=1, base=args.base, out_channels=K).to(device)
+    model = UNet(in_channels=1, base=args.base, out_channels=K,
+                 embed_dim=args.embed_dim).to(device)
     if args.init:
         ckpt = torch.load(args.init, map_location=device, weights_only=False)
         sd = ckpt["state_dict"]
@@ -389,8 +449,11 @@ def main() -> int:
         # NOTE: base 96/128 init from base-64 checkpoints only transfers the
         # shallow layers whose channel counts match (enc1/enc2); deeper ones
         # are randomly initialized (printed as missing).
+        # embed_head: transferred when the init checkpoint has one (方案 E
+        # continuation); otherwise randomly initialized (printed as missing).
         sd = {k: v for k, v in sd.items() if k.startswith("enc") or k.startswith("bottleneck")
-              or k.startswith("up") or k.startswith("dec") or k.startswith("out")}
+              or k.startswith("up") or k.startswith("dec") or k.startswith("out")
+              or k.startswith("embed")}
         missing, unexpected = model.load_state_dict(sd, strict=False)
         print(f"initialized from {args.init} (missing={len(missing)} unexpected={len(unexpected)})")
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -402,7 +465,8 @@ def main() -> int:
     ema_decay = float(getattr(args, "ema_decay", 0.999))
     ema_model = None
     if ema_decay > 0:
-        ema_model = UNet(in_channels=1, base=64, out_channels=K).to(device)
+        ema_model = UNet(in_channels=1, base=args.base, out_channels=K,
+                         embed_dim=args.embed_dim).to(device)
         ema_model.load_state_dict(model.state_dict())
         ema_model.eval()
 
@@ -430,7 +494,7 @@ def main() -> int:
                 # higher curve channels empty (4/5-curve charts are rarer
                 # in the training distribution)
                 w = (y.sum(dim=(2, 3)) > 0).float() * 0.7 + 0.3
-                logit = model(x)
+                logit, emb = model.forward_embed(x)
                 loss = (bce_dice_loss(logit, y) * w).mean()
                 # skeleton-recall term (clDice family): penalize missing the
                 # GT skeleton pixels -- directly targets dash/gap/jump
@@ -441,6 +505,12 @@ def main() -> int:
                     den = s.sum(dim=(1, 2, 3)) + 1e-6
                     skel_recall = (num / den).mean()
                     loss = loss + 0.5 * (1.0 - skel_recall)
+                # GOI terms (方案 E): intra-class pull + inter-class global
+                # orthogonality on the embedding head (0 when disabled).
+                if args.embed_dim > 0 and (y > 0).any():
+                    pull, ortho = goi_loss(emb, y)
+                    loss = (loss + args.goi_weight * pull
+                            + args.goi_ortho * ortho)
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.step(opt)
@@ -476,7 +546,8 @@ def main() -> int:
             best_iou = v_iou
             torch.save({"state_dict": (ema_model or model).state_dict(),
                         "epoch": epoch, "val_iou": v_iou, "val_dice": v_dice,
-                        "ema_decay": ema_decay}, args.out)
+                        "ema_decay": ema_decay, "embed_dim": args.embed_dim,
+                        "base": args.base, "size": args.size}, args.out)
             print(f"  -> saved {args.out} (val_iou={v_iou:.4f}, ema)")
 
     print(f"done. best val_iou = {best_iou:.4f} -> {args.out}")

@@ -23,6 +23,7 @@ multi_mask_thr: 0.3         # multi-channel mask threshold
 multi_truncate_jumps: true  # cut chain tails that left the curve
 multi_min_area: 450         # ghost-channel suppression (px; 0 = off)
 multi_independent_mask: true  # candidate C phase 1: no argmax exclusion at crossings
+multi_embed_merge: false      # 方案 E: GOI embedding small-cluster merge (需嵌入头 checkpoint)
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot

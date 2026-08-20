@@ -193,4 +193,68 @@ def test_augment_no_flip_keeps_inputs():
     oi, om, os_ = _augment(img, inst, inst.copy())
     assert oi[10, 10] == 0 and om[0, 10, 10] == 255 and os_[0, 10, 10] == 255
 
+# ---------------------------------------------------------------------------
+# 方案 E: GOI embedding head + loss + small-cluster merge (2026-08-20)
+# ---------------------------------------------------------------------------
+def test_unet_embed_head_forward_compat():
+    import torch
+    from mci.models.segmentation.unet import UNet
+
+    m = UNet(in_channels=1, base=16, out_channels=6, embed_dim=8)
+    x = torch.randn(2, 1, 32, 32)
+    assert m(x).shape == (2, 6, 32, 32)          # forward unchanged
+    logit, emb = m.forward_embed(x)
+    assert logit.shape == (2, 6, 32, 32) and emb.shape == (2, 8, 32, 32)
+    m0 = UNet(in_channels=1, base=16, out_channels=6)  # embed_dim=0
+    logit0, emb0 = m0.forward_embed(x)
+    assert emb0 is None
+
+
+def test_goi_loss_pull_ortho():
+    import torch
+    from train.train_segmentation_multi import goi_loss
+
+    B, E, H, W, K = 1, 8, 16, 16, 3
+    y = torch.zeros(B, K, H, W)
+    y[0, 0, 2:8, 2:8] = 1
+    y[0, 1, 9:15, 9:15] = 1
+    emb = torch.zeros(B, E, H, W)
+    emb[0, 0, 2:8, 2:8] = 1.0    # instance 0 embedding = e_0
+    emb[0, 1, 9:15, 9:15] = 1.0  # instance 1 embedding = e_1 (orthogonal)
+    emb[0, 2, :, :] = 0.0        # empty channel
+    emb = emb + torch.randn_like(emb) * 0.001
+    pull, ortho = goi_loss(emb, y)
+    assert pull.item() < 0.05      # intra-class pull ~0
+    assert ortho.item() < 0.05     # orthogonal centroids ~0
+    emb2 = emb.clone()
+    emb2[0, 1, 9:15, 9:15] = 0.0   # strip e_1 from instance 1 pixels
+    emb2[0, 0, 9:15, 9:15] = 1.0   # both instances now embed to e_0 -> collinear
+    _, ortho2 = goi_loss(emb2, y)
+    assert ortho2.item() > 0.5
+
+
+def test_embed_merge_reassigns_small_component():
+    from mci.pipeline.curve_extractor import _embed_merge_masks
+
+    K, H, W, E = 2, 40, 40, 4
+    masks = [np.zeros((H, W), np.uint8), np.zeros((H, W), np.uint8)]
+    masks[0][5:15, 5:15] = 1     # instance 0 block
+    masks[1][25:35, 25:35] = 1   # instance 1 block
+    reg = np.stack([m.astype(np.float32) * 0.9 for m in masks])
+    emb = np.zeros((E, H, W), np.float32)
+    emb[0, 5:15, 5:15] = 1.0      # instance 0 centroid = e_0
+    emb[1, 25:35, 25:35] = 1.0    # instance 1 centroid = e_1
+    emb[0] += 0.001; emb[1] += 0.001
+    # small component (9px) inside instance 1's mask, embedding = e_1
+    masks[1][30:33, 3:6] = 1
+    emb[1, 30:33, 3:6] = 1.0
+    out = _embed_merge_masks(masks, reg, emb, min_area=450, plot_w=W, plot_h=H)
+    assert out[1][30:33, 3:6].sum() == 9   # stays in instance 1
+    # same small comp but embedding = e_0 -> moves to instance 0
+    masks[1][2:5, 2:5] = 1
+    emb[0, 2:5, 2:5] = 1.0
+    out2 = _embed_merge_masks(masks, reg, emb, min_area=450, plot_w=W, plot_h=H)
+    assert out2[1][2:5, 2:5].sum() == 0     # moved away from instance 1
+    assert out2[0][2:5, 2:5].sum() == 9     # into instance 0
+
 

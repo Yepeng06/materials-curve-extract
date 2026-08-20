@@ -43,7 +43,7 @@ class UNet(nn.Module):
     K > 1 = per-instance curve channels (Phase C multi-curve)."""
 
     def __init__(self, in_channels: int = 1, base: int = 64,
-                 out_channels: int = 1):
+                 out_channels: int = 1, embed_dim: int = 0):
         super().__init__()
         self.pool = nn.MaxPool2d(2)
         self.enc1 = DoubleConv(in_channels, base)
@@ -57,8 +57,14 @@ class UNet(nn.Module):
         self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
         self.dec1 = DoubleConv(base * 2, base)
         self.out = nn.Conv2d(base, out_channels, 1)
+        # GOI embedding head (方案 E): parallel per-pixel embedding for
+        # instance separation; forward() is unchanged for backward
+        # compatibility, forward_embed() returns (logit, emb).
+        self.embed_head = None
+        if embed_dim > 0:
+            self.embed_head = nn.Conv2d(base, embed_dim, 1)
 
-    def forward(self, x):
+    def _encode(self, x):
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
@@ -66,7 +72,17 @@ class UNet(nn.Module):
         d3 = self.dec3(torch.cat([self.up3(b), e3], dim=1))
         d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
         d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
-        return self.out(d1)
+        return d1
+
+    def forward(self, x):
+        return self.out(self._encode(x))
+
+    def forward_embed(self, x):
+        """(logit, embedding) — embedding is None when embed_dim == 0."""
+        d1 = self._encode(x)
+        logit = self.out(d1)
+        emb = self.embed_head(d1) if self.embed_head is not None else None
+        return logit, emb
 
 
 def bce_dice_loss(logit: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

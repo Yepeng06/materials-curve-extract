@@ -566,6 +566,70 @@ def _truncate_jumps(chain, max_jump: float = 30.0, min_len: int = 40):
     return chain[:cut]
 
 
+def _embed_merge_masks(masks, reg, emb, min_area, plot_w, plot_h):
+    """GOI small-cluster merge (方案 E): re-assign small per-channel mask
+    components to the instance whose embedding centroid is nearest.
+
+    masks: list of per-channel plot-local masks (None = dropped channel);
+    reg: (K, H, W) plot-local probabilities; emb: (E, H, W) L2-normalized
+    full-image embeddings (cropped to the plot extent here).
+
+    Components with area in [8, max(floor, min_area)) are re-assigned to the
+    channel with the highest embedding cosine score (> 0.5); otherwise they
+    keep their own channel (the min_area drop already ran before this).
+    """
+    from skimage.measure import label as sk_label
+
+    K = len(masks)
+    ph, pw = plot_h, plot_w
+    for m in masks:
+        if m is not None:
+            ph, pw = m.shape
+            break
+    emb_c = emb[:, :ph, :pw]
+    ctr, ok = [], []
+    for c in range(K):
+        m = masks[c]
+        if m is None:
+            ctr.append(None); ok.append(False); continue
+        conf = (m > 0) & (reg[c] > 0.6)
+        if int(conf.sum()) < 4:
+            ctr.append(None); ok.append(False); continue
+        cv = emb_c[:, conf].mean(axis=1)
+        n = float(np.linalg.norm(cv))
+        ctr.append(cv / n if n > 1e-6 else None); ok.append(n > 1e-6)
+    out = [m.copy() if m is not None else None for m in masks]
+    floor = max(8, min_area // 2) if min_area > 0 else 8
+    for c in range(K):
+        m = masks[c]
+        if m is None:
+            continue
+        lab, n_comp = sk_label(m, connectivity=1, return_num=True)
+        if n_comp <= 1:
+            continue
+        for i in range(1, n_comp + 1):
+            comp = lab == i
+            area = int(comp.sum())
+            if area < 8 or (min_area > 0 and area >= min_area):
+                continue
+            if area >= floor:
+                continue  # not small enough to merge
+            px = emb_c[:, comp]
+            if px.shape[1] < 2:
+                continue
+            cv = px.mean(axis=1)
+            nv = float(np.linalg.norm(cv))
+            if nv < 1e-6:
+                continue
+            cv = cv / nv
+            scores = [float(ctr[j] @ cv) if ok[j] else -2.0 for j in range(K)]
+            best = int(np.argmax(scores))
+            if scores[best] > 0.5 and best != c:
+                out[best][comp] = 1
+                out[c][comp] = 0
+    return out
+
+
 def extract_curves_multi(    image_bgr: np.ndarray,
     structure: ChartStructure,
     x_axis: AxisSpec,
@@ -610,10 +674,23 @@ def extract_curves_multi(    image_bgr: np.ndarray,
     # tracing then resolves the junction.  Default stays argmax for
     # backward compatibility / A-B comparison (PHASE D ablation A5).
     independent = bool(cfg.get("multi_independent_mask", False))
-    curves: List[Curve] = []
+    min_area = int(cfg.get("multi_min_area", 0))
+    # GOI embedding merge (方案 E): small components are re-assigned to the
+    # instance whose embedding centroid they are nearest to, instead of being
+    # dropped outright (ChartZero small-cluster merge).  Requires a checkpoint
+    # with an embedding head and multi_embed_merge: true.
+    embed_merge = bool(cfg.get("multi_embed_merge", False))
+    emb = None
+    if embed_merge:
+        emb = getattr(segmenter, "embed_full", lambda im: None)(image_bgr)
+        if emb is None:
+            embed_merge = False  # checkpoint has no embedding head
+    # ---- pass 1: build per-channel masks ----
+    masks: List[Optional[np.ndarray]] = []
     for c in range(prob.shape[0]):
         region = reg[c]
         if float(region.max()) < thr:
+            masks.append(None)
             continue
         if independent:
             mask01 = (region > thr).astype(np.uint8)
@@ -621,12 +698,20 @@ def extract_curves_multi(    image_bgr: np.ndarray,
             mask01 = ((region > thr) & (amax == c)).astype(np.uint8)
         mask01 = _filter_mask_fragments(mask01, plot_w, plot_h)
         if int(mask01.sum()) < 16:
+            masks.append(None)
             continue
-        # ghost-channel suppression (LineFormer over-segmentation fix):
-        # tiny channels (legend glyphs / curve fragments) are dropped.
-        min_area = int(cfg.get("multi_min_area", 0))
         if min_area > 0 and int(mask01.sum()) < min_area:
+            masks.append(None)
             continue
+        masks.append(mask01)
+    if embed_merge:
+        masks = _embed_merge_masks(masks, reg, emb, min_area, plot_w, plot_h)
+    # ---- pass 2: trace each surviving channel ----
+    curves: List[Curve] = []
+    for c, mask01 in enumerate(masks):
+        if mask01 is None:
+            continue
+        region = reg[c]
         skel = skeletonize(mask01.astype(bool)).astype(np.uint8)
         chain = _trace_chain(skel)
         if chain is not None:

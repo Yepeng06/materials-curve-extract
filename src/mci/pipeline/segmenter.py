@@ -74,10 +74,16 @@ class MultiUNetSegmenter:
             )
         from ..models.segmentation.unet import UNet
 
-        self.model = UNet(in_channels=1, base=64,
-                          out_channels=out_channels).to(self.device)
         ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["state_dict"])
+        # GOI embedding head (方案 E): built only when the checkpoint has one.
+        self.embed_dim = int(ckpt.get("embed_dim", 0))
+        base = int(ckpt.get("base", 64))
+        self.model = UNet(in_channels=1, base=base,
+                          out_channels=out_channels,
+                          embed_dim=self.embed_dim).to(self.device)
+        missing, unexpected = self.model.load_state_dict(ckpt["state_dict"], strict=False)
+        if missing or unexpected:
+            print(f"[MultiUNetSegmenter] {checkpoint}: missing={len(missing)} unexpected={len(unexpected)}")
         self.model.eval()
 
     def prob_full(self, image_bgr: np.ndarray) -> np.ndarray:
@@ -91,6 +97,22 @@ class MultiUNetSegmenter:
         prob = torch.sigmoid(logit)[0].cpu().numpy()  # (K, size, size)
         out = np.stack([cv2.resize(prob[c], (w, h), interpolation=cv2.INTER_LINEAR)
                         for c in range(prob.shape[0])]).astype(np.float32)
+        return out
+
+    def embed_full(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """(E, H, W) L2-normalized per-pixel embeddings, or None when the
+        checkpoint has no embedding head (GOI merge unavailable)."""
+        if self.embed_dim <= 0:
+            return None
+        h, w = image_bgr.shape[:2]
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(gray, (self.size, self.size), interpolation=cv2.INTER_AREA)
+        x = torch.from_numpy(small).float().unsqueeze(0).unsqueeze(0) / 255.0
+        with torch.no_grad():
+            _, emb = self.model.forward_embed(x.to(self.device))
+        emb = torch.nn.functional.normalize(emb, dim=1)[0].cpu().numpy()  # (E, size, size)
+        out = np.stack([cv2.resize(emb[c], (w, h), interpolation=cv2.INTER_LINEAR)
+                        for c in range(emb.shape[0])]).astype(np.float32)
         return out
 
 
