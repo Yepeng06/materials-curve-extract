@@ -110,3 +110,51 @@ def test_extract_curves_multi_separates_instances():
     assert len(curves) == 2
     y_means = [float(np.mean([p[1] for p in c.points])) for c in curves]
     assert max(y_means) - min(y_means) > 10  # two well-separated curves
+
+# ---------------------------------------------------------------------------
+# jump truncation (regression: off-by-one on steep-tail chains, 2026-08-20)
+# ---------------------------------------------------------------------------
+def _chain(n_flat, n_steep=2, jump=60.0):
+    """n_flat gentle points then a steep sustained tail (the crash case)."""
+    pts = [(float(i), float(50 + 0.2 * i)) for i in range(n_flat)]
+    y = pts[-1][1]
+    for k in range(n_steep):
+        y += jump
+        pts.append((float(n_flat + k), y))
+    return pts
+
+
+def test_truncate_jumps_steep_tail_no_crash():
+    from mci.pipeline.curve_extractor import _truncate_jumps
+
+    # two consecutive 60px tail jumps: the run is cut (no IndexError)
+    ch = _chain(120, n_steep=2)
+    out = _truncate_jumps(ch)
+    assert len(out) == len(ch) - 2     # jumped tail points removed
+    dy = np.abs(np.diff([p[1] for p in out]))
+    assert float(dy[-1]) <= 30.0       # no jump left at the end
+    # long sustained tail: last two points removed, no crash
+    ch6 = _chain(120, n_steep=6)
+    out6 = _truncate_jumps(ch6)
+    assert len(out6) == len(ch6) - 2
+    # single isolated jump in the middle (no consecutive pair): unchanged
+    mid = [(float(i), float(50 + 0.2 * i)) for i in range(200)]
+    mid[100] = (100.0, 50.0 + 60.0)          # one jump, then flat from new level
+    for i in range(101, 200):
+        mid[i] = (float(i), 110.0 + 0.2 * (i - 100))
+    assert _truncate_jumps(mid) == mid
+
+
+def test_truncate_jumps_gentle_chain_unchanged():
+    from mci.pipeline.curve_extractor import _truncate_jumps
+
+    ch = [(float(i), float(50 + 0.2 * i)) for i in range(200)]
+    assert _truncate_jumps(ch) == ch
+
+
+def test_truncate_jumps_short_chain_unchanged():
+    from mci.pipeline.curve_extractor import _truncate_jumps
+
+    ch = [(float(i), float(i)) for i in range(30)]  # < min_len + 2
+    assert _truncate_jumps(ch) == ch
+

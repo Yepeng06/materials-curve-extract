@@ -554,9 +554,10 @@ def _truncate_jumps(chain, max_jump: float = 30.0, min_len: int = 40):
         return chain
     xs = np.asarray([p[0] for p in chain], dtype=np.float64)
     ys = np.asarray([p[1] for p in chain], dtype=np.float64)
-    dy = np.abs(np.diff(ys))
+    dy = np.abs(np.diff(ys))  # length = len(chain) - 1
     cut = len(chain)
-    for i in range(len(chain) - 2, -1, -1):
+    # dy[i+1] must stay in bounds: i+1 <= len(dy)-1 = len(chain)-2
+    for i in range(len(chain) - 3, -1, -1):
         if dy[i] > max_jump and dy[i + 1] > max_jump:
             cut = i + 1
             break
@@ -603,12 +604,21 @@ def extract_curves_multi(    image_bgr: np.ndarray,
     # the skeleton tracer from switching curves at crossings.
     reg = prob[:, y0 : y1 + 1, x0 : x1 + 1]  # (K, H, W)
     amax = np.argmax(reg, axis=0)  # winner channel per pixel
+    # Candidate C Phase 1 (multi-label): keep every pixel above the
+    # threshold in EVERY channel (no argmax exclusion), so crossing
+    # regions are not stripped from either curve.  Direction-continuity
+    # tracing then resolves the junction.  Default stays argmax for
+    # backward compatibility / A-B comparison (PHASE D ablation A5).
+    independent = bool(cfg.get("multi_independent_mask", False))
     curves: List[Curve] = []
     for c in range(prob.shape[0]):
         region = reg[c]
         if float(region.max()) < thr:
             continue
-        mask01 = ((region > thr) & (amax == c)).astype(np.uint8)
+        if independent:
+            mask01 = (region > thr).astype(np.uint8)
+        else:
+            mask01 = ((region > thr) & (amax == c)).astype(np.uint8)
         mask01 = _filter_mask_fragments(mask01, plot_w, plot_h)
         if int(mask01.sum()) < 16:
             continue

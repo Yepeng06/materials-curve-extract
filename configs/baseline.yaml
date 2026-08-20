@@ -21,7 +21,8 @@ unet_size: 512              # inference resolution (must match training resoluti
 multi_unet_checkpoint: models/checkpoints/unet_multi_curve_evalfix.pt
 multi_mask_thr: 0.3         # multi-channel mask threshold
 multi_truncate_jumps: true  # cut chain tails that left the curve
-multi_min_area: 0           # ghost-channel suppression (px; 0 = off)
+multi_min_area: 450         # ghost-channel suppression (px; 0 = off)
+multi_independent_mask: true  # candidate C phase 1: no argmax exclusion at crossings
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot
