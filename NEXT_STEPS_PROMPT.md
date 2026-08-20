@@ -247,3 +247,43 @@ $PY -m pytest tests -q              # 当前 110/110
 
 > 交接 v5 完成于 2026-08-19。上一版 v4（2026-08-18）见 git 历史。
 > 详细研究依据见 C_RESEARCH.md；根因修复设计见 C_FIX_DESIGN.md；验收材料见 PHASE_D_ACCEPTANCE.md。
+
+## 十、AutoDL 云端自主工作流（2026-08-20 起，AI 自主执行）
+
+### 10.1 实例与环境（已就绪）
+- **027 机 RTX 4090 24GB**（¥1.98/h 按量；040 机同配置 ¥2.18/h），Ubuntu 22.04
+- SSH：见 `F:\CODE\New\autodl_secret.json`（**不入库**，密码变更只改此文件）；助手脚本 `F:\CODE\New\autodl.py`（run / upload / upload_dir）
+- 环境：conda base Python 3.12.3；torch 2.8.0+cu128（先验证兼容，不兼容再重装 2.13.0+cu126）；**numpy 1.26.4 已固定**；paddlepaddle 3.3.1 + paddleocr 3.7.0（CPU 版即可）；ultralytics 8.4.115；fastapi/uvicorn 已装
+- 代码：`/root/baseline`（已解压，含全部配置/脚本/文档）；数据：`/root/baseline/data`（1.1GB，已含训练/验证/Phase D 全套）；模型：`/root/baseline/models/checkpoints`（evalfix_r2 / evalfix / 512c / unet_curve / yolo_struct）
+
+### 10.2 AI 可自主完成的环节（已验证）
+1. SSH 连接（paramiko 密码登录）
+2. 环境检查 + 依赖安装（版本与本地 mci 完全一致，numpy 1.26.4 为硬约束）
+3. 代码/数据/模型上传（SFTP；1.1GB 数据 + 125MB checkpoint 一次性传输）
+4. import 冒烟测试（torch/numpy/paddle/ultralytics/mci 全通过）
+5. 训练执行与监控（有卡开机后：`--batch 16-32`、25 epoch 预计 <1h、best-iou checkpoint 自动保存）
+6. 评估执行（eval_multi_6ab / evaluate.py / diag 全套）
+7. 结果下载回本地（SFTP）
+
+### 10.3 必须用户操作的环节（唯一硬依赖）
+1. **有卡开机/关机**：AutoDL 控制台点"开机"（无卡→有卡，可能排队；4090 空闲 1/8）；或提供 AutoDL API token 后可由 AI 调 API 开机（未实现，待用户决定）
+2. **账户余额**：按量计费从账户扣款
+3. 关机提醒：训练/评估完成后 AI 会提醒用户关机（或配置 API 自动关机）
+
+### 10.4 云端训练命令（开机后直接用）
+```bash
+export PATH=/root/miniconda3/bin:$PATH
+cd /root/baseline
+# 方案 C 验证重训（batch 16-32，25 epoch，预计 <1h；可加 --init evalfix_r2.pt 续训）
+python train/train_segmentation_multi.py --data-dir data/train_platform,data/train_platform_4c,data/train_platform_5c,data/train_platform_single --val-dir data/val_multi,data/val_single --epochs 25 --batch 16 --size 512 --per-dir-limit 600 --init models/checkpoints/unet_multi_curve_512c.pt --out models/checkpoints/unet_multi_curve_cloud.pt --ema-decay 0.999
+# 评估（6a/6b）
+python scripts/eval_multi_6ab.py --data-dir data/val_multi,data/val_single --model models/checkpoints/unet_multi_curve_cloud.pt --out-dir data/eval_multi_6ab_cloud --size 512
+# Phase D 验收
+python scripts/eval_multi_6ab.py --data-dir data/eval_phased_500 --model models/checkpoints/unet_multi_curve_cloud.pt --out-dir data/eval_phased_multi_cloud --size 512
+```
+
+### 10.5 云端 vs 本地分工
+- **云端**：重训（E/H 方案：base 96/128、768-1024 分辨率）、全量验收评估——显存/速度优势
+- **本地**：日常开发、小实验、pytest、真实图验证、文档
+- 注意：云端训练脚本 base=64 硬编码（方案 H 需参数化，改 train_segmentation_multi.py 的 UNet(base=64) 为 --base 参数，改动前先本地验证）
+
