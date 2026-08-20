@@ -3,7 +3,8 @@
 > AI 你好，这是项目阶段性交接文件。**你必须全文阅读后再开始工作。**
 > 本文件可修改（不同于上级 Prompt.md）。
 > 交接日期：2026-08-19（**Phase C 根因突破 + 修复重训暂停在 epoch 4**）
-> 更新：2026-08-20（**重训完成 val_iou 0.7636 + 方案 C Phase 1 实施：6a/6b 全面超基线 + Phase D 验收**）
+> 更新：2026-08-20（**v6：重训完成 val_iou 0.7636 + 方案 C Phase 1 实施 + Phase D 验收**）
+> 更新：2026-08-20（**v7：云端 AutoDL 实验轮——增强 flip bug 修复、768/512-fixed 对照、三模型结论；实例已关机**）
 > **用户强调：无论何时都要先做深入研究（论文/社区文档/官方文档）再设计动手**，
 > 研究充分后选择最合适的方法，方案/计划必须经过充分调研。
 > **真实文献曲线图仍在收集中**（Phase A.3 用户任务，到位后优先 B-5 真实图验证）。
@@ -18,7 +19,8 @@
 | B-5a | OCR 刻度值误读增强（10^N 上标消歧/标签中心像素等） | ✅ **paddle 达标率 70%→99%** |
 | Phase C 首轮 | 多曲线实例分割（U-Net K=6）、CSV 重建掩码、多曲线提取/评估管线 | 🟡 召回 67.7%（目标 95%） |
 | **C-2 根因修复（本会话）** | **发现并修复「训练目标 ≠ 评估基准」根因**：训练侧 _fit_axis_from_labels 底部标签过滤（c[1]<img_h-85）排除最底部 y 刻度 → **y 轴 25.5%（904/3548）+ x 轴 1.8%（65/3680）训练图把 log 轴误判 linear**，log 轴上训练掩码错位 100+px。修复：训练改走与评估完全相同的代码路径（detect_structure→read_ticks→build_axes→value_to_pixel）重建掩码 | ✅ 已修复并验证（240/240 通道对齐；pytest 110/110） |
-| **C-2 重训验证** | 修复目标 + EMA(0.999) + 骨架召回损失（clDice 族），25 epoch 从 512c 续训 | ⏸ **暂停在 epoch 4：val_iou 0.7345**（旧 512c 仅 0.4993，+47%）；checkpoint 已保存可用 |
+| **C-2 重训验证** | 修复目标 + EMA(0.999) + 骨架召回损失（clDice 族），25 epoch 从 512c 续训 | ✅ **完成：evalfix_r2 val_iou 0.7636（+53% vs 512c）**；后处理升级（independent+min_area450）后 val 集 6a/6b=0.7185/0.7004，Phase D 多曲线 6a 0.7869、单曲线 99.4% ≤1% |
+| **2026-08-20 云端实验轮** | AutoDL 4090：增强 flip bug 修复（cv2 3D 陷阱）、768 分辨率实验、512-fixed 对照 | ✅ 完成（详见 3.7/10.3.5）；实例已关机 |
 | **Phase D 材料** | 500 张多曲线 + 500 张单曲线验收集（独立 seed 20260819） | ✅ 已生成（data/eval_phased_500 / _single） |
 
 ### 做得好（关键成功点）
@@ -31,7 +33,7 @@
 ### 不够理想 / 问题在哪
 | 问题 | 根因 | 现状 |
 |------|------|------|
-| **重训未跑完** | 用户暂停（epoch 4/25） | checkpoint 已保存（val_iou 0.7345，best-iou 保存策略）；**下一步优先：续训或直接评估该 checkpoint** |
+| ~~重训未跑完~~ | 已续训完成（evalfix_r2 0.7636） | ✅ 另发现并修复 **cv2.flip 3D 增强 bug**（历史训练 50% 样本目标错位，详见坑 17） |
 | Phase C 召回 67.7%（修复前基线） | **根因已定位**：训练目标与评估基准不一致（见上）；叠加失败分布：1-2% 边缘 83 条（log 轴 1px≈2% rel + 概率峰值 +1~2px）、2-5% 47 条、>5% local_spike 41 条（尾部集中 decile 8-9 占 68%，**曲线交叉/靠近处 argmax 互斥丢弃通道像素**——实验证实交叉重叠区占图内墨迹 10-32%）、虚检 19 图（pred=5） | 修复已落地，重训验证中；local_spike 待新模型复测后决定 Hungarian 分支配对 |
 | 6b 口径虚检惩罚 | 过分割/幽灵通道（面积 51-625px 碎片，部分与真曲线同量级） | min_area 过滤已实现（曲线数准确率 47/60→57/60，6b +1.5pp，6a -0.8pp 需谨慎调参） |
 | 单曲线召回 91.7%（5/60 失败） | 4/5 失败图是 log 轴，且训练侧旧 fit 误判（img_0036 y=fit None→掩码全零；img_0037/0051 y=linear vs log）——**属同一根因** | 修复后预期单曲线也回升，待重训验证 |
@@ -40,28 +42,28 @@
 ### 解决办法（候选路径，按证据×成本，2026-08-19 调研后排序）
 | 方案 | 证据 | 成本 | 状态 |
 |------|------|------|------|
-| A. 训练目标修复（统一映射路径） | 根因实证（904 例不一致） | 已实施 | ✅ 重训验证中（epoch 4 已 +47% val_iou） |
+| A. 训练目标修复（统一映射路径） | 根因实证（904 例不一致） | 已实施 | ✅ 完成（evalfix_r2 0.7636） |
 | B. EMA + 骨架召回损失（clDice 族） | clDice/SRL（ECCV24）细长结构强证据 | 低（已实施） | ✅ 已随重训 |
-| C. 交叉分支配对 + Hungarian（纯后处理） | 对应 local_spike 41 条；LineFormer/追踪文献 | 中 | 📋 待新模型复测后实现 |
-| D. 虚检抑制（min_area） | LineFormer 社区实证（过检 +62.3%→微调 -52.7pct） | 低（已实现） | 📋 新模型上精细调参后默认开 |
+| C. 交叉分支配对 + Hungarian（纯后处理） | 对应 local_spike 41 条；LineFormer/追踪文献 | 中 | 📋 Phase 1（independent 多标签）已实施（73fe133）并显著提升 6a（0.607→0.722）；Phase 2 分支配对暂缓（决策门槛见 C_PAIRING_DESIGN.md） |
+| D. 虚检抑制（min_area） | LineFormer 社区实证（过检 +62.3%→微调 -52.7pct） | 低（已实现） | ✅ **已默认开（multi_min_area: 450）**：6b 0.7004 历史最高，曲线数 168/180 |
 | E. GOI 损失（嵌入头+正交+merge） | ChartZero 消融（IoU 0.75→0.82） | 高（改架构） | 📋 观察 A+B 结果后决定 |
 | F. CoordConv / GroupNorm | ChartZero 消融（+0.06 IoU） | 低 | 📋 随 E 或独立验证 |
 | G. 6a/6b 双口径 + 薄线子集指标 | LineFormer/EpiCurveBench | 低（已实现 6a/6b） | ✅ eval_multi_6ab.py |
-| H. 更大模型 base 64→96/128 / 分辨率 768-1024 | STU-Net（2.1M→8.4M 真实收益）；细线任务分辨率首要杠杆 | 高（本地 8GB 受限；可租 GPU ~¥2-10/次） | 📋 本地验证后如需加速再租 |
+| H. 更大模型 base 64→96/128 / 分辨率 768-1024 | STU-Net（2.1M→8.4M 真实收益）；细线任务分辨率首要杠杆 | 高（本地 8GB 受限；可租 GPU ~¥2-10/次） | 📋 **768 分辨率已实测：无端到端收益（6a -1.3pp，后处理像素阈值尺度敏感）**；base 96/128 未测（待 --base 参数化，需先请示） |
 | I. 图例颜色辅助归属 / VLM 语义先验 | WebPlotDigitizer/PlotPick（VLM 召回 88-96%） | 中 | 📋 真实图阶段优先 |
 | J. 曲线形态模板扩展（陡峭尾部/交叉） | 合成多样性>数量（域随机化经典证据） | 中 | 📋 若重训后仍不足 |
 
 ### 后续计划（优先级）
-1. **【首选】恢复 C-2 重训**（25 epoch 跑完或至少 15+）→ `eval_multi_6ab.py` 对比 6a/6b vs 基线 6a=0.6767/6b=0.6534；预期 systematic_bias/边缘/单曲线失败大幅改善
-2. **【重训后】失败复测**：eval_multi_diag + diag_error_pattern 复跑 → 决定 C（Hungarian 分支配对）/D（min_area 调参）
-3. **【评估基建】Phase D 验收**：在 500+500 验收集上跑 evaluate.py（单曲线）+ eval_multi_6ab（多曲线），产出验收报告与 ablation 表（PHASE_D_ACCEPTANCE.md 已列矩阵 A1-A9）
+1. **【当前最佳】evalfix_r2 + independent + min_area450**：val 6a/6b=0.7185/0.7004；Phase D 多曲线 6a 0.7869、单曲线 99.4%。距 95% 目标差距 = 交叉归属（local_spike）+ 边缘精度
+2. **【待用户决策】下一轮实验**（云端已就绪，实例关机）：E（GOI 损失，需实现+确认）/ H-base（base 96，需 --base 参数化，~15min）/ 或真实图验证（依赖用户图）
+3. **【评估基建】Phase D 复核**：可把 768/512fix 模型也跑 500 图验收（云端 ~1-2h）
 4. **【依赖用户】B-5 真实图验证**：图到位后 --ocr paddle 评估 + gold 标注 RMSE
-5. **【可选】Web 多曲线展示**（multi_unet 选项已接入前后端，待新模型默认值生效）
-6. **【需训练，先请示】E/F/H/J**（GOI/CoordConv/更大模型/模板扩展）——本地 8GB 或租 GPU
+5. **【可选】Web 多曲线展示**（multi_unet 已接入，默认模型已切 evalfix_r2）
+6. **云端注意**：AutoDL 027 机 ¥1.98/h 按量，无卡模式免费；凭据/脚本见第十节
 
 ### 技术栈（现状）
 - Python 3.11（Anaconda env **mci**）、PyTorch 2.13+cu126（GPU）、ultralytics 8.4.115、PaddleOCR 3.7.0（CPU）、numpy 1.26.4（固定）、OpenCV/scikit-image/scipy、FastAPI + 原生前端
-- 模型：U-Net 单曲线（unet_curve.pt 512，val_iou 0.8166）+ **多曲线 K=6**：**unet_multi_curve_evalfix_r2.pt（重训完成，val_iou 0.7636，当前最佳）**、evalfix.pt（epoch 4，0.7345）、历史 512c（0.4993）/512d + YOLOv8n 结构检测
+- 模型：U-Net 单曲线（unet_curve.pt 512，val_iou 0.8166）+ **多曲线 K=6**：**unet_multi_curve_evalfix_r2.pt（val_iou 0.7636，6a/6b 最佳组合，默认）**、unet_multi_512fix.pt（val_iou 0.7714，fixed-aug，6a 0.7093）、unet_multi_768.pt（val_iou 0.7531，曲线数 172/180 最高）、evalfix.pt（epoch 4）、512c（0.4993）+ YOLOv8n 结构检测
 - **推理配置（2026-08-20 起）**：multi_independent_mask: true（方案 C Phase 1 多标签）+ multi_min_area: 450（虚检抑制）——val 集 6a/6b = 0.7185/0.7004，曲线数 168/180，全面超 512c 基线（0.6741/0.6512）
 - 管线：extractor 单一入口，segmenter: cv|unet|multi_unet；structure_backend: cv|yolo；ocr: stub|paddle
 
@@ -142,6 +144,13 @@
 - **Phase D 验收集**：500 多曲线（曲线数 1-5，轴型 4 组合）+ 500 单曲线，独立 seed
 - **argmax 实验结论**：曲线交叉重叠区占图内墨迹 10-32%（img_0007 31.6%），argmax 互斥在交叉处丢弃一个通道的像素 → local_spike 结构性来源；独立阈值多标签平均多保留 2497px/图（LineFormer 方向）
 
+### 3.7 2026-08-20 云端实验轮（AutoDL 4090，已关机）
+
+1. **增强 flip bug 修复**（commit 9f7c66c，重大）：cv2.flip 对 (K,H,W) 掩码——512 下 OpenCV 绑定按通道启发式只翻高度轴（垂直镜像），与图像水平镜像错位（历史全部训练 50% 样本目标污染）；768 下直接崩溃。修复 np.flip(inst,2)[::-1] + 2 回归测试。
+2. **768 分辨率实验**（unet_multi_768.pt）：val_iou 0.7531；评估 6a=0.6963/6b=0.6861/**曲线数 172/180（最高）**——无端到端收益（后处理像素阈值尺度敏感）
+3. **512-fixed 对照**（unet_multi_512fix.pt）：val_iou **0.7714（历史最高）**、loss 0.145（buggy 训练 0.573 的 1/4）；评估 6a=0.7093/6b=0.6964/170/180——增强修复改善 val_iou 但 6a/6b 中性
+4. **结论**：①分辨率 768 不投；②像素指标与端到端召回再次脱节；③**最佳组合仍为 evalfix_r2 + ind + ma450（6a 0.7185/6b 0.7004）**；④云端流程全自主化已验证（SSH/装环境/传数据 1.2G/训练/评估/下载，见第十节）
+
 ### 3.6 2026-08-20 会话：重训完成 + 评估 + 方案 C Phase 1（commit 73fe133 / 51dc66e）
 
 1. **重训完成**：evalfix.pt（epoch 4）续跑 21 epoch（共 25）→ **evalfix_r2.pt，val_iou 0.7636**
@@ -170,7 +179,7 @@
 
 
 ## 四、测试与质量
-- pytest **113/113**（+4 legend_matcher、+3 _truncate_jumps 回归）
+- pytest **115/115**（+4 legend_matcher、+3 _truncate_jumps、+2 增强 flip 回归）
 - 单曲线回归基准（不得回退）：合成 med ≤0.40%/87.5%、平台 100% ≤1%、paddle 99%
 - 多曲线基线（当前数据重跑口径 540 GT）：512c 6a=0.6741/6b=0.6512/161/180；**evalfix_r2+independent+min_area450：6a=0.7185/6b=0.7004/168/180（2026-08-20 最佳）**；Phase D 500 图：6a=0.7869/6b=0.7133/346/500
 
