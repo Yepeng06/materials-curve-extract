@@ -18,12 +18,12 @@ y_kind_hint: auto
 segmenter: multi_unet      # cv | unet | multi_unet (2026-08-20: 默认多曲线，最新成果)
 unet_checkpoint: models/checkpoints/unet_curve.pt
 unet_size: 512              # inference resolution (must match training resolution)
-multi_unet_checkpoint: models/checkpoints/unet_multi_curve_evalfix_r2.pt
+multi_unet_checkpoint: models/checkpoints/unet_multi_goi.pt
 multi_mask_thr: 0.3         # multi-channel mask threshold
 multi_truncate_jumps: true  # cut chain tails that left the curve
 multi_min_area: 450         # ghost-channel suppression (px; 0 = off)
 multi_independent_mask: true  # candidate C phase 1: no argmax exclusion at crossings
-multi_embed_merge: false      # 方案 E: GOI embedding small-cluster merge (需嵌入头 checkpoint)
+multi_embed_merge: true       # 方案 E: GOI embedding small-cluster merge (unet_multi_goi.pt 起默认开)
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot

@@ -53,6 +53,12 @@
 | I. 图例颜色辅助归属 / VLM 语义先验 | WebPlotDigitizer/PlotPick（VLM 召回 88-96%） | 中 | 📋 真实图阶段优先 |
 | J. 曲线形态模板扩展（陡峭尾部/交叉） | 合成多样性>数量（域随机化经典证据） | 中 | 📋 若重训后仍不足 |
 
+### 2026-08-23 状态（方案 E GOI 完成）
+- **GOI 完整训练（云端 25ep）**：val_iou **0.7740** 历史最高；val 集 6a/6b = **0.7352/0.7192**（+embed_merge）；**Phase D 500 图 6a=0.8065（+2.0pp）/ 6b=0.7306（+1.7pp）**
+- **默认配置已切**：multi_unet_checkpoint=unet_multi_goi.pt + multi_embed_merge: true；pytest 118/118
+- 剩余差距：1-2% 边缘桶 69（候选方案 K 亚像素）、>5% 桶 31（primary_obvious 20 条；Phase 2 分支配对）
+- 云端实例（新 4090）已完成本轮任务，**待关机**
+
 ### 2026-08-21 状态（本轮收尾）
 - **方案 E（GOI）已实现**（commit 3f08b3e，pytest 118/118）+ 本地 5-epoch 预训练验证稳定（曲线数 173/180 历史最高）；云端 25-epoch 完整训练待 4090 空闲（开机排队中）
 - **候选方案 K（亚像素细化）设计注记**：C_SUBPIXEL_DESIGN.md（K1 偏差校正→K2 质心修正→K3 Steger），针对 1-2% 边缘桶 67 条
