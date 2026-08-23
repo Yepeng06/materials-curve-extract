@@ -149,15 +149,41 @@ def detect_structure(image_bgr: np.ndarray, cfg: Dict | None = None) -> ChartStr
     )
     # y-axis ticks: short horizontal strokes just left of the left axis line
     # (the curve is always to the RIGHT of the axis, so no interior check;
-    # the x-axis line itself is excluded by row range)
+    # the x-axis line itself is excluded by row range).  T2 hardening: some
+    # journals draw ticks INWARD (right of the axis) -- the right band is
+    # also scanned, but rows whose stroke continues > 6 px into the plot are
+    # rejected (bars/curves starting at the axis would otherwise vote).
     y_votes: Dict[int, int] = {}
     for bw in tick_scales:
-        y_band = ink[:, max(0, x_axis - 2 - bw) : max(0, x_axis - 2)]
-        for row in np.where(y_band.sum(axis=1) >= 2)[0]:
-            row = int(row)
-            if axis_top <= row <= y_axis:
-                continue  # the x-axis line itself, not a y tick
-            y_votes[row] = y_votes.get(row, 0) + 1
+        # left band (existing behaviour)
+        lo = max(0, x_axis - 2 - bw)
+        hi = max(0, x_axis - 2)
+        if hi > lo:
+            y_band = ink[:, lo:hi]
+            for row in np.where(y_band.sum(axis=1) >= 2)[0]:
+                row = int(row)
+                if axis_top <= row <= y_axis:
+                    continue  # the x-axis line itself, not a y tick
+                y_votes[row] = y_votes.get(row, 0) + 1
+        # right band (inward ticks)
+        lo2 = x_axis + 2
+        hi2 = min(w, x_axis + 2 + bw)
+        if hi2 > lo2:
+            y_band2 = ink[:, lo2:hi2]
+            for row in np.where(y_band2.sum(axis=1) >= 2)[0]:
+                row = int(row)
+                if axis_top <= row <= y_axis:
+                    continue
+                # reject the AXIS LINE itself (and bars/curves hugging it):
+                # their ink columns are vertically continuous (present in
+                # neighbouring rows too), while a tick stroke is isolated
+                cols = np.nonzero(y_band2[row])[0] + lo2
+                nbr_ink = ink[max(0, row - 2) : min(ink.shape[0], row + 3), cols]
+                if int((nbr_ink.sum(axis=0) >= 1).sum()) >= len(cols):
+                    continue  # every stroke column continues vertically
+                if ink[row, hi2 : min(w, hi2 + 6)].any():
+                    continue  # stroke continues into the plot (curve/bar)
+                y_votes[row] = y_votes.get(row, 0) + 1
     y_ticks_px = _group_runs(
         np.asarray([r for r, n in y_votes.items() if n >= 2], dtype=np.float64)
     )
