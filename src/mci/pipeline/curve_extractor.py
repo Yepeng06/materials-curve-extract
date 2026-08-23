@@ -232,12 +232,22 @@ def _bridge_dash_gaps(mask: np.ndarray, max_gap: int = 48) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Chain tracing
 # ---------------------------------------------------------------------------
-def _trace_chain(skel: np.ndarray) -> Optional[List[Tuple[int, int]]]:
+def _trace_chain(skel: np.ndarray, prob: Optional[np.ndarray] = None,
+                 lookahead: int = 10, prob_weight: float = 0.35,
+                 active: Optional[np.ndarray] = None,
+                 ) -> Optional[List[Tuple[int, int]]]:
     """Walk the skeleton from the leftmost endpoint with direction continuity.
 
-    At junctions (grid crossings) the neighbour that continues the current
-    direction is preferred, so the walk follows the curve instead of turning
-    onto a crossing line.
+    At junctions (grid crossings, curve crossings / approach zones) the
+    neighbour that continues the current direction is preferred, so the
+    walk follows the curve instead of turning onto a crossing line.
+
+    P1b: when ``prob`` (this channel's plot-local probability map) and
+    ``active`` (approach-zone mask) are given, junction candidates at
+    positions inside ``active`` are additionally scored by the accumulated
+    probability along a short lookahead walk of their branch.  Outside
+    approach zones the pure direction score is kept (a naive global
+    probability term regresses normal charts: 0.7870 -> 0.7759 on val).
     """
     ys, xs = np.nonzero(skel)
     pts = set(zip(xs.tolist(), ys.tolist()))
@@ -256,6 +266,28 @@ def _trace_chain(skel: np.ndarray) -> Optional[List[Tuple[int, int]]]:
     if len(endpoints) >= 2:
         end = min((e for e in endpoints if e != start), key=lambda p: (p[0], p[1]))
 
+    def _walk_score(n0, dir0):
+        """Direction score + (inside approach zones) normalized lookahead
+        probability sum for the branch starting at candidate n0."""
+        # direction part (same as baseline)
+        dx, dy = n0[0] - cur[0], n0[1] - cur[1]
+        dscore = -(dx * dir0[0] + dy * dir0[1])
+        if prob is None or active is None or not active[cur[1], cur[0]]:
+            return dscore
+        # lookahead walk along the skeleton from n0 (direction continuity)
+        acc, cnt = 0.0, 0
+        prev_p, p = cur, n0
+        for _ in range(lookahead):
+            acc += float(prob[p[1], p[0]])
+            cnt += 1
+            nxt = [m for m in nbrs(p) if m != prev_p]
+            if not nxt:
+                break
+            d = (p[0] - prev_p[0], p[1] - prev_p[1])
+            nxt.sort(key=lambda m: (-((m[0] - p[0]) * d[0] + (m[1] - p[1]) * d[1]), m[0], m[1]))
+            prev_p, p = p, nxt[0]
+        return dscore + prob_weight * (acc / max(cnt, 1))
+
     path: List[Tuple[int, int]] = []
     cur, prev = start, None
     while True:
@@ -269,14 +301,9 @@ def _trace_chain(skel: np.ndarray) -> Optional[List[Tuple[int, int]]]:
             break
         if prev is not None:
             dir0 = (cur[0] - prev[0], cur[1] - prev[1])
-
-            def score(n):
-                dx, dy = n[0] - cur[0], n[1] - cur[1]
-                return (-(dx * dir0[0] + dy * dir0[1]), -n[0], n[1])
+            cand.sort(key=lambda n: -_walk_score(n, dir0))
         else:
-            def score(n):
-                return (-n[0], n[1])
-        cand.sort(key=score)
+            cand.sort(key=lambda n: (-n[0], n[1]))
         prev, cur = cur, cand[0]
         if len(path) > len(pts) + 2:
             break
@@ -790,6 +817,10 @@ def extract_curves_multi(    image_bgr: np.ndarray,
             continue
         region = reg[c]
         skel = skeletonize(mask01.astype(bool)).astype(np.uint8)
+        # P1b rejected: prob-guided trace (even gated to approach zones)
+        # regresses 0.7870 -> 0.7778 -- channel probability is not
+        # discriminative for branch exits either; >5% bucket is deferred to
+        # training-side fixes (P2 hard-example augmentation).
         chain = _trace_chain(skel)
         if chain is not None:
             xs = [p[0] for p in chain]
