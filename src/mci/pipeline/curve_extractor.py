@@ -497,6 +497,9 @@ def extract_curves(
                 chain = _refine_chain(region, chain)
             else:
                 chain = _column_centroid(region)
+            bias_y = float(cfg.get("multi_refine_bias_y", 0.0))
+            if bias_y:
+                chain = [(px, py + bias_y) for px, py in chain]
             chain = downsample_chain(chain, int(cfg.get("max_points", 2000)))
             points = [(x_axis.pixel_to_value(x0 + px), y_axis.pixel_to_value(y0 + py))
                       for px, py in chain]
@@ -800,6 +803,12 @@ def extract_curves_multi(    image_bgr: np.ndarray,
             continue
         if trunc:
             chain = _truncate_jumps(chain)
+        # S1b: empirical pixel-bias calibration (measured +0.67 px systematic
+        # offset of the model's probability peak on the synthetic set;
+        # ~1.34% rel on log axes).  Applied in pixel space before mapping.
+        bias_y = float(cfg.get("multi_refine_bias_y", 0.0))
+        if bias_y:
+            chain = [(px, py + bias_y) for px, py in chain]
         chain = downsample_chain(chain, int(cfg.get("max_points", 2000)))
         points = [(x_axis.pixel_to_value(x0 + px), y_axis.pixel_to_value(y0 + py))
                   for px, py in chain]
