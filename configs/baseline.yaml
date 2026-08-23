@@ -24,6 +24,7 @@ multi_truncate_jumps: true  # cut chain tails that left the curve
 multi_min_area: 450         # ghost-channel suppression (px; 0 = off)
 multi_independent_mask: true  # candidate C phase 1: no argmax exclusion at crossings
 multi_embed_merge: true       # 方案 E: GOI embedding small-cluster merge (unet_multi_goi.pt 起默认开)
+multi_refine_radius: 6        # P1: skip window-centroid refine in approach zones (0.7352 -> 0.7444)
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot

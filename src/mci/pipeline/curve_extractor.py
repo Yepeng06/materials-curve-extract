@@ -334,13 +334,23 @@ def _column_centroid(prob: np.ndarray, thr: float = 0.3) -> List[Tuple[int, floa
 
 
 def _refine_chain(prob: np.ndarray, chain: List[Tuple[int, int]],
-                  radius: int = 6) -> List[Tuple[float, float]]:
+                  radius: int = 6, skip_mask: Optional[np.ndarray] = None,
+                  ) -> List[Tuple[float, float]]:
     """Sub-pixel refinement: local probability-weighted centroid around each
     skeleton point.  A small window keeps the centroid on the curve even on
-    steep segments (unlike per-column centroids)."""
+    steep segments (unlike per-column centroids).
+
+    P1: when ``skip_mask`` is given, skeleton points inside it (approach
+    zones where another channel also fires) keep their integer skeleton
+    position -- the window centroid there is pulled toward the other curve
+    (measured: disabling refine moves 7 curves out of the 1-2% bucket,
+    recall 0.7352 -> 0.7481)."""
     h, w = prob.shape
     out: List[Tuple[float, float]] = []
     for x, y in chain:
+        if skip_mask is not None and skip_mask[y, x]:
+            out.append((float(x), float(y)))
+            continue
         x0, x1 = max(0, x - radius), min(w, x + radius + 1)
         y0, y1 = max(0, y - radius), min(h, y + radius + 1)
         patch = prob[y0:y1, x0:x1]
@@ -630,6 +640,50 @@ def _embed_merge_masks(masks, reg, emb, min_area, plot_w, plot_h):
     return out
 
 
+def _resolve_approach_zones(masks, reg, emb, dist: int = 4,
+                            min_gap: float = 0.10, conf_thr: float = 0.6):
+    """P1: approach-zone ownership resolution.
+
+    Independent multi-label masks keep BOTH channels' pixels where two
+    curves overlap/touch (measured: 357 px overlap for one val image);
+    the skeleton then fuses there and the direction-greedy tracer
+    switches curves (17/31 of the >5% failures are crossing_jump, 100%
+    of the error lies in approach zones).  For every pixel activated by
+    MORE THAN ONE channel we assign it to the channel with the highest
+    probability (per-pixel argmax over the active channels), but only
+    when the probability gap exceeds ``min_gap`` (otherwise both keep
+    the pixel, deferring to the tracer).  Non-overlap pixels are left
+    multi-label, preserving the Phase-C independent-mask benefit.
+
+    NOTE: the GOI embedding head of the current checkpoint is NOT
+    discriminative enough for this decision (centroid cosine ~0.9996
+    between close curves, measured on val img_0069), so the probability
+    signal is used instead of embedding cosines.
+    """
+    K = len(masks)
+    out = [m.copy() if m is not None else None for m in masks]
+    for c in range(K):
+        m = masks[c]
+        if m is None:
+            continue
+        for j in range(c + 1, K):
+            mj = masks[j]
+            if mj is None:
+                continue
+            overlap = (m > 0) & (mj > 0)
+            if int(overlap.sum()) < 4:
+                continue
+            diff = reg[c][overlap] - reg[j][overlap]
+            idx = np.nonzero(overlap)
+            for i in range(len(idx[0])):
+                yy, xx = idx[0][i], idx[1][i]
+                if diff[i] > min_gap:
+                    out[j][yy, xx] = 0
+                elif diff[i] < -min_gap:
+                    out[c][yy, xx] = 0
+    return out
+
+
 def extract_curves_multi(    image_bgr: np.ndarray,
     structure: ChartStructure,
     x_axis: AxisSpec,
@@ -656,6 +710,7 @@ def extract_curves_multi(    image_bgr: np.ndarray,
     # truncation cuts chains that left the curve (sustained |dy| jumps).
     thr = float(cfg.get("multi_mask_thr", 0.3))
     trunc = bool(cfg.get("multi_truncate_jumps", True))
+    refine = bool(cfg.get("multi_refine", True))
 
     prob = segmenter.prob_full(image_bgr)  # (K, H, W)
     if prob.ndim != 3 or prob.shape[0] < 1:
@@ -706,7 +761,26 @@ def extract_curves_multi(    image_bgr: np.ndarray,
         masks.append(mask01)
     if embed_merge:
         masks = _embed_merge_masks(masks, reg, emb, min_area, plot_w, plot_h)
+        if bool(cfg.get("multi_zone_resolve", False)):
+            masks = _resolve_approach_zones(masks, reg, emb)
     # ---- pass 2: trace each surviving channel ----
+    # P1: approach-zone mask per channel = pixels of this mask within
+    # `refine_radius` of ANY other channel's mask; _refine_chain skips the
+    # window centroid there (it gets pulled toward the other curve, moving
+    # curves out of the 1-2% bucket; recall 0.7352 -> 0.7481 when off).
+    refine_radius = int(cfg.get("multi_refine_radius", 6))
+    from scipy.ndimage import binary_dilation as _bin_dil
+    near_masks = []
+    for c in range(len(masks)):
+        m = masks[c]
+        if m is None:
+            near_masks.append(None)
+            continue
+        near_others = np.zeros(m.shape, dtype=bool)
+        for j in range(len(masks)):
+            if j != c and masks[j] is not None:
+                near_others |= _bin_dil(masks[j].astype(bool), iterations=refine_radius)
+        near_masks.append((m > 0) & near_others)
     curves: List[Curve] = []
     for c, mask01 in enumerate(masks):
         if mask01 is None:
@@ -718,9 +792,9 @@ def extract_curves_multi(    image_bgr: np.ndarray,
             xs = [p[0] for p in chain]
             if (max(xs) - min(xs) + 1) < 0.7 * plot_w:
                 chain = None
-        if chain is not None:
-            chain = _refine_chain(region, chain)
-        else:
+        if chain is not None and refine:
+            chain = _refine_chain(region, chain, skip_mask=near_masks[c])
+        elif chain is None:
             chain = _column_centroid(region)
         if not chain or len(chain) < 8:
             continue
