@@ -171,7 +171,14 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
     # ---- pre-RANSAC outlier rejection BEFORE the kind judgement ----
     # a misread tick (e.g. "2" in a 0.0..0.7 axis) would otherwise
     # poison the value-sequence vote; run RANSAC in both spaces, keep the
-    # space with more inliers, and blank the dropped ticks for the judge
+    # space with more inliers, and blank the dropped ticks for the judge.
+    # Tie-break (S3 hardening): when both spaces keep the same number of
+    # inliers, pick the space whose cleaned ticks fit best IN ITS OWN space
+    # (linear R^2 vs log10 R^2).  Without this, a corrupted log tick that
+    # collides with a neighbour's value (e.g. 0.001*10 -> 0.01 == the real
+    # 0.01) makes the LINEAR fit look equally good, the wrong (linear) keep
+    # set is chosen, the slope degenerates to ~0 and pixel_to_value
+    # explodes (measured: rel error 1e20+ on 34/180 val images).
     drop_px = set()
     if len(v) >= 4:
         inl_lin = _ransac_inliers(p, v)
@@ -179,7 +186,26 @@ def fit_axis(ticks: List[Tick], role: AxisRole, kind_hint: str = "auto",
         pos = v > 0
         if int(pos.sum()) >= 4:
             inl_log[pos] = _ransac_inliers(p[pos], np.log10(v[pos]))
-        keep = inl_lin if int(inl_lin.sum()) >= int(inl_log.sum()) else inl_log
+        if int(inl_lin.sum()) != int(inl_log.sum()):
+            keep = inl_lin if int(inl_lin.sum()) > int(inl_log.sum()) else inl_log
+        else:
+            # tie: grade the cleaned sets in their own spaces
+            def _grade(mask: np.ndarray, logspace: bool) -> float:
+                pk, vk = p[mask], v[mask]
+                if len(vk) < 2 or (logspace and float((vk > 0).sum()) < 2):
+                    return -1.0
+                yv = np.log10(vk) if logspace else vk
+                ok_ = np.isfinite(yv)
+                if int(ok_.sum()) < 2:
+                    return -1.0
+                a, b = np.polyfit(pk[ok_], yv[ok_], 1)
+                pred = a * pk[ok_] + b
+                ss_res = float(np.sum((yv[ok_] - pred) ** 2))
+                ss_tot = float(np.sum((yv[ok_] - yv[ok_].mean()) ** 2))
+                return 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 1.0
+
+            g_lin, g_log = _grade(inl_lin, False), _grade(inl_log, True)
+            keep = inl_log if g_log > g_lin + 1e-6 else inl_lin
         if 3 <= int(keep.sum()) < len(v):
             drop_px = {valued[i][0] for i in range(len(valued)) if not keep[i]}
             p = p[keep]
