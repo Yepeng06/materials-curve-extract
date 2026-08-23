@@ -122,6 +122,27 @@ def main() -> int:
             img = alpha_composite_white(img)
             structure = detect_structure(img, cfg)
             x_ticks, y_ticks = read_ticks(img, structure, ocr, cfg)
+            # T2b: categorical axis detection -- an axis whose labels are all
+            # non-numeric (drug names, month names...) carries no numeric
+            # scale; bar charts / category plots are NOT curve-extraction
+            # targets and must not be counted as pipeline failures.
+            from mci.utils import parse_number_text
+
+            def _axis_kind(ticks, side):
+                vals = [parse_number_text(t.text) for t in ticks if t.text]
+                if len(vals) >= 2 and all(v is None for v in vals):
+                    return "categorical"
+                return "numeric"
+
+            xk = _axis_kind(x_ticks, "x")
+            yk = _axis_kind(y_ticks, "y")
+            if xk == "categorical" or yk == "categorical":
+                row.update(status="categorical", x_axis=xk, y_axis=yk,
+                           n_x_ticks=len(x_ticks), n_y_ticks=len(y_ticks),
+                           elapsed_s=round(time.time() - t0, 2))
+                rows.append(row)
+                print(f"[CAT] {key}: x={xk} y={yk}")
+                continue
             x_axis, y_axis = build_axes(
                 x_ticks, y_ticks,
                 x_endpoints=(float(structure.y_axis_pixel), float(structure.plot_bbox[2])),
