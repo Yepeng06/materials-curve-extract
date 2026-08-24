@@ -87,6 +87,97 @@ def goi_loss(emb: torch.Tensor, y: torch.Tensor) -> tuple:
     return pull, ortho
 
 
+def approach_zone_mask(y: torch.Tensor, dist: int = 4) -> torch.Tensor:
+    """GT approach-zone pixels: pixels of instance i whose dilated mask
+    touches instance j (curves closer than ``dist`` px).  (B, H, W) bool.
+
+    P1a measured that 100% of the >5% failure error lies inside these
+    zones and the embeddings/probabilities there are NOT discriminative
+    (centroid cosine 0.9996) -- this loss gives the model an explicit
+    training signal to separate instances there.
+    """
+    B, K, H, W = y.shape
+    dil = torch.nn.functional.max_pool2d(
+        y, kernel_size=2 * dist + 1, stride=1, padding=dist
+    )  # (B, K, H, W) dilated instances
+    overlap = (dil.sum(dim=1) > 1)  # pixels touched by >= 2 instances
+    return overlap & (y.sum(dim=1) > 0)
+
+
+def goi_loss_contrastive(emb: torch.Tensor, y: torch.Tensor,
+                         near: torch.Tensor, margin: float = 0.2,
+                         lam_pull: float = 1.0, lam_ortho: float = 1.0,
+                         lam_contrast: float = 1.0) -> tuple:
+    """GOI + approach-zone contrastive loss (杠杆 1).
+
+    Standard GOI terms (pull, ortho) as in goi_loss, PLUS a contrastive
+    term on approach-zone pixels: for every near pixel, push its embedding
+    toward its OWN instance centroid and away from the WRONG instance
+    centroid (hinge).  This directly targets the measured failure: the
+    model currently cannot tell two curves apart where they touch.
+    Returns (pull, ortho, contrast).
+    """
+    B, E, H, W = emb.shape
+    Kc = y.shape[1]
+    emb = torch.nn.functional.normalize(emb, dim=1)
+    ysum = y.sum(dim=1)
+    valid = (ysum > 0) & ~(ysum > 1)  # non-empty, non-overlap pixels
+    labels = y.argmax(dim=1)
+
+    # per-instance centroids from confident (non-near, non-overlap) pixels
+    ctrs = torch.zeros(B, Kc, E, device=emb.device)
+    ctr_n = torch.zeros(B, Kc, device=emb.device)
+    for b in range(B):
+        for k in range(Kc):
+            m = (y[b, k] > 0) & valid[b] & ~near[b]
+            if bool(m.any()):
+                c = emb[b, :, m].mean(dim=1)
+                ctrs[b, k] = torch.nn.functional.normalize(c, dim=0)
+                ctr_n[b, k] = 1.0
+
+    pull_num = torch.zeros((), device=emb.device)
+    pull_den = torch.zeros((), device=emb.device)
+    ortho_terms = []
+    for b in range(B):
+        m_valid = valid[b] & ~near[b]
+        if bool(m_valid.any()):
+            lab = labels[b][m_valid]
+            px = emb[b, :, m_valid]                # (E, N)
+            cos = (px.t() * ctrs[b][lab]).sum(dim=1)  # (N,)
+            pull_num = pull_num + (1.0 - cos).sum()
+            pull_den = pull_den + float(lab.numel())
+        for i in range(Kc):
+            for j in range(i + 1, Kc):
+                if ctr_n[b, i] > 0 and ctr_n[b, j] > 0:
+                    ortho_terms.append(float((ctrs[b, i] * ctrs[b, j]).sum().item()) ** 2)
+
+    pull = pull_num / pull_den.clamp(min=1e-6)
+    ortho = (torch.tensor(ortho_terms, device=emb.device).mean()
+             if ortho_terms else torch.zeros((), device=emb.device))
+
+    # ---- contrastive on approach-zone pixels ----
+    contr_num = torch.zeros((), device=emb.device)
+    contr_den = torch.zeros((), device=emb.device)
+    if bool(near.any()):
+        for b in range(B):
+            m = near[b] & valid[b]
+            if not bool(m.any()):
+                continue
+            lab = labels[b][m]                       # (N,)
+            px = emb[b, :, m]                        # (E, N)
+            cstack = ctrs[b]                         # (K, E)
+            cos_all = cstack @ px                    # (K, N)
+            cos_own = cos_all[lab, torch.arange(cos_all.shape[1], device=emb.device)]
+            # wrong centroid = argmax over the OTHER instances
+            cos_wrong, _ = cos_all.clone().scatter_(
+                0, lab.unsqueeze(0), torch.full_like(cos_all, -2.0)
+            ).max(dim=0)
+            contr_num = contr_num + torch.clamp(cos_wrong - cos_own + margin, min=0.0).sum()
+            contr_den = contr_den + float(lab.numel())
+    contrast = contr_num / contr_den.clamp(min=1e-6)
+    return pull, ortho, contrast
+
+
 def _list_pairs(data_dir: str):
     pairs = []
     for d in data_dir.split(","):
@@ -399,6 +490,12 @@ def main() -> int:
                     help="GOI intra-class pull loss weight")
     ap.add_argument("--goi-ortho", type=float, default=0.1,
                     help="GOI inter-class orthogonality loss weight")
+    ap.add_argument("--zone-dist", type=int, default=4,
+                    help="杠杆1: approach-zone dilation distance (px)")
+    ap.add_argument("--zone-margin", type=float, default=0.2,
+                    help="杠杆1: contrastive hinge margin (cosine)")
+    ap.add_argument("--zone-contrast", type=float, default=0.5,
+                    help="杠杆1: approach-zone contrastive loss weight (0 disables)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -507,10 +604,19 @@ def main() -> int:
                     loss = loss + 0.5 * (1.0 - skel_recall)
                 # GOI terms (方案 E): intra-class pull + inter-class global
                 # orthogonality on the embedding head (0 when disabled).
+                # 杠杆 1: approach-zone contrastive loss when embed_dim > 0.
                 if args.embed_dim > 0 and (y > 0).any():
-                    pull, ortho = goi_loss(emb, y)
-                    loss = (loss + args.goi_weight * pull
-                            + args.goi_ortho * ortho)
+                    near = approach_zone_mask(y, dist=args.zone_dist)
+                    if args.zone_contrast > 0 and bool(near.any()):
+                        pull, ortho, contr = goi_loss_contrastive(
+                            emb, y, near, margin=args.zone_margin)
+                        loss = (loss + args.goi_weight * pull
+                                + args.goi_ortho * ortho
+                                + args.zone_contrast * contr)
+                    else:
+                        pull, ortho = goi_loss(emb, y)
+                        loss = (loss + args.goi_weight * pull
+                                + args.goi_ortho * ortho)
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.step(opt)

@@ -63,6 +63,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data-dir", default="data/val_multi,data/val_single")
     ap.add_argument("--model", default="models/checkpoints/unet_multi_curve.pt")
+    ap.add_argument("--avg-with", default=None,
+                    help="ensemble: average probabilities with this second checkpoint")
     ap.add_argument("--out-dir", default="data/eval_multi_6ab")
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--limit", type=int, default=0)
@@ -79,7 +81,7 @@ def main() -> int:
         images = images[: args.limit]
 
     cfg = load_config()
-    segmenter = MultiUNetSegmenter(args.model, size=args.size)
+    segmenter = MultiUNetSegmenter(args.model, size=args.size, avg_with=args.avg_with)
     os.makedirs(args.out_dir, exist_ok=True)
 
     rows = []

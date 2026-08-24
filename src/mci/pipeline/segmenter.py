@@ -63,7 +63,7 @@ class MultiUNetSegmenter:
     """
 
     def __init__(self, checkpoint: str, device: str = "auto", size: int = 256,
-                 out_channels: int = 6):
+                 out_channels: int = 6, avg_with: Optional[str] = None):
         self.size = size
         self.out_channels = out_channels
         self.device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
@@ -85,6 +85,16 @@ class MultiUNetSegmenter:
         if missing or unexpected:
             print(f"[MultiUNetSegmenter] {checkpoint}: missing={len(missing)} unexpected={len(unexpected)}")
         self.model.eval()
+        # P2 ensemble: average probabilities with a second checkpoint.
+        self.aux_model = None
+        if avg_with and os.path.exists(avg_with):
+            ck2 = torch.load(avg_with, map_location=self.device, weights_only=False)
+            self.aux_model = UNet(in_channels=1, base=int(ck2.get("base", 64)),
+                                  out_channels=out_channels,
+                                  embed_dim=int(ck2.get("embed_dim", 0))).to(self.device)
+            self.aux_model.load_state_dict(ck2["state_dict"], strict=False)
+            self.aux_model.eval()
+            print(f"[MultiUNetSegmenter] ensemble with {avg_with}")
 
     def prob_full(self, image_bgr: np.ndarray) -> np.ndarray:
         """(K, H, W) float instance-probability maps at full image size."""
@@ -94,6 +104,11 @@ class MultiUNetSegmenter:
         x = torch.from_numpy(small).float().unsqueeze(0).unsqueeze(0) / 255.0
         with torch.no_grad():
             logit = self.model(x.to(self.device))
+        prob = torch.sigmoid(logit)[0].cpu().numpy()  # (K, size, size)
+        if self.aux_model is not None:
+            with torch.no_grad():
+                logit2 = self.aux_model(x.to(self.device))
+            prob = 0.5 * (prob + torch.sigmoid(logit2)[0].cpu().numpy())
         prob = torch.sigmoid(logit)[0].cpu().numpy()  # (K, size, size)
         out = np.stack([cv2.resize(prob[c], (w, h), interpolation=cv2.INTER_LINEAR)
                         for c in range(prob.shape[0])]).astype(np.float32)
