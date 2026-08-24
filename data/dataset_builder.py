@@ -233,12 +233,60 @@ def sample_params(rng: np.random.Generator, template: dict, sample_seed: int,
                x_range=x_range, x_label=x_label, x_unit=x_unit,
                y_label=y_label, y_unit=y_unit,
                template_file=tpl_id, template_name=tpl_name, seed=sample_seed)
+    cfg["hard_crossing"] = float(getattr(args, "hard_crossing", 0.0))
     return cfg
 
 
 # ---------------------------------------------------------------------------
 # 曲线生成（平台曲线模型）
 # ---------------------------------------------------------------------------
+def _apply_hard_crossing(curves: list[dict], rng: np.random.Generator) -> None:
+    """P2: make two curves cross or run close together (approach zones).
+
+    The platform generator vertically layers curves by index, so crossing /
+    touching curves are essentially absent from training -- which is exactly
+    the measured weakness (17/31 of the >5% failures are approach-zone
+    switching).  With probability per sample, pick a pair and either:
+      'cross': shift curve i vertically so it intersects curve j at a random
+               x (X-type crossing);
+      'hug':   shift curve i's segment in [x_lo, x_hi] to run parallel to j
+               at a small offset (2-6 px equivalent), with linear edge
+               blends, then shift the whole curve to keep continuity.
+    Data-domain offsets: y spans ~0-1.2 over ~600 px, so 1 px ≈ 0.002.
+    """
+    if len(curves) < 2:
+        return
+    i, j = rng.choice(len(curves), 2, replace=False)
+    ci, cj = curves[i], curves[j]
+    pts_i = np.asarray(ci["data_points"], dtype=np.float64)
+    pts_j = np.asarray(cj["data_points"], dtype=np.float64)
+    x0, x1 = float(pts_i[0, 0]), float(pts_i[-1, 0])
+    span = max(x1 - x0, 1e-9)
+    if rng.random() < 0.5:
+        # ---- cross: shift curve i so it intersects j at a random x ----
+        xc = x0 + rng.uniform(0.3, 0.7) * span
+        yj = float(np.interp(xc, pts_j[:, 0], pts_j[:, 1]))
+        yi = float(np.interp(xc, pts_i[:, 0], pts_i[:, 1]))
+        pts_i[:, 1] += yj - yi
+    else:
+        # ---- hug: run parallel to j inside [x_lo, x_hi] ----
+        x_lo = x0 + rng.uniform(0.08, 0.25) * span
+        x_hi = x_lo + rng.uniform(0.2, 0.5) * span
+        off = rng.uniform(0.004, 0.012) * (1.0 if rng.random() < 0.5 else -1.0)
+        m = (pts_i[:, 0] >= x_lo) & (pts_i[:, 0] <= x_hi)
+        if int(m.sum()) >= 8:
+            yj_seg = np.interp(pts_i[m, 0], pts_j[:, 0], pts_j[:, 1])
+            target = yj_seg + off
+            blend = max(int(0.06 * span / max(np.diff(pts_i[m, 0]).mean(), 1e-9)), 2)
+            n = int(m.sum())
+            ramp = np.ones(n)
+            if blend < n:
+                ramp[:blend] = np.linspace(0, 1, blend)
+                ramp[-blend:] = np.linspace(1, 0, blend)
+            pts_i[m, 1] = pts_i[m, 1] * (1 - ramp) + target * ramp
+    ci["data_points"] = [[float(v) for v in p] for p in pts_i]
+
+
 def make_curves(cfg: dict, sample_seed: int) -> list[dict]:
     P = _PLATFORM
     rng = np.random.default_rng(sample_seed)
@@ -258,6 +306,8 @@ def make_curves(cfg: dict, sample_seed: int) -> list[dict]:
             "marker": cfg["marker"], "curve_index": ci,
             "total_curves": cfg["num_curves"], "data_points": pts,
         })
+    if float(cfg.get("hard_crossing", 0.0)) > 0 and rng.random() < float(cfg["hard_crossing"]):
+        _apply_hard_crossing(curves, rng)
     return curves
 
 
@@ -714,6 +764,8 @@ def main(argv=None) -> int:
                     help="逗号分隔的模板 id 子集（默认全部）")
     ap.add_argument("--no-log", action="store_true", help="禁用对数轴扩展")
     ap.add_argument("--no-degrade", action="store_true", help="不做图像退化")
+    ap.add_argument("--hard-crossing", type=float, default=0.0,
+                    help="P2: 曲线交叉/贴近困难样本概率 (0-1, 如 0.4)")
     ap.add_argument("--yolo", action="store_true", help="额外输出 YOLOv8 标签")
     args = ap.parse_args(argv)
     args.allow_log = not args.no_log
