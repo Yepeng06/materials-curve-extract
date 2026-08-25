@@ -499,26 +499,38 @@ class ChartDataset(Dataset):
             if self.chain_cache is not None and axes is not None:
                 chain = _build_chain_targets(curves_json, os.path.dirname(img_path),
                                              axes, (img.shape[1], img.shape[0]))
+                # cache at TRAINING resolution (512): full-res float32
+                # chain targets for 3300 images blew the container memory
+                # (121 GB > cgroup limit, silent kill)
+                chain = cv2.resize(chain.transpose(1, 2, 0), (self.size, self.size),
+                                   interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
                 self.chain_cache[key] = chain
             if self.chainx_cache is not None and axes is not None:
                 chain_x = _build_chain_targets_x(curves_json, os.path.dirname(img_path),
                                                  axes, (img.shape[1], img.shape[0]))
+                chain_x = cv2.resize(chain_x.transpose(1, 2, 0), (self.size, self.size),
+                                     interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
                 self.chainx_cache[key] = chain_x
             if self.cache is not None:
-                self.cache[key] = inst
+                # cache at training resolution too (saves ~11 GB for 3300
+                # images vs full-res uint8 masks; training always resizes)
+                inst512 = cv2.resize(inst.transpose(1, 2, 0), (self.size, self.size),
+                                     interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
+                self.cache[key] = inst512
+                inst = inst512
                 if self.skel_cache is not None:
-                    self.skel_cache[key] = skel
+                    skel512 = cv2.resize(skel.transpose(1, 2, 0), (self.size, self.size),
+                                         interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
+                    self.skel_cache[key] = skel512
+                    skel = skel512
         img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_AREA)
-        inst = cv2.resize(inst.transpose(1, 2, 0), (self.size, self.size),
-                          interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
-        skel = cv2.resize(skel.transpose(1, 2, 0), (self.size, self.size),
-                          interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
+        inst = np.ascontiguousarray(inst)
+        skel = np.ascontiguousarray(skel)
         if chain is not None:
-            chain = cv2.resize(chain.transpose(1, 2, 0), (self.size, self.size),
-                               interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+            # already cached at training resolution (512)
+            chain = np.ascontiguousarray(chain)
         if chain_x is not None:
-            chain_x = cv2.resize(chain_x.transpose(1, 2, 0), (self.size, self.size),
-                                 interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+            chain_x = np.ascontiguousarray(chain_x)
 
         if self.augment:
             img, inst, skel, chain, chain_x = _augment(img, inst, skel, chain, chain_x)

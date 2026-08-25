@@ -162,9 +162,23 @@ def main() -> int:
             print(f"[OK ] {key}: curves={len(curves)} xk={row['x_kind']} yk={row['y_kind']} "
                   f"ticks=({len(x_ticks)},{len(y_ticks)}) {row['elapsed_s']}s")
         except Exception as e:
-            row.update(status="fail", error=f"{type(e).__name__}: {str(e)[:150]}",
-                       elapsed_s=round(time.time() - t0, 2))
-            print(f"[ERR] {key}: {row['error']}")
+            # T2b: before declaring failure, check whether this is a
+            # non-target bar chart (AxisFitError with rectangular bars) --
+            # bar charts are NOT curve-extraction targets.
+            bar = False
+            try:
+                from mci.pipeline.bar_detector import is_bar_chart
+                bar = is_bar_chart(img, structure)
+            except Exception:
+                bar = False
+            if bar:
+                row.update(status="bar_chart", error=f"{type(e).__name__}: {str(e)[:100]}",
+                           elapsed_s=round(time.time() - t0, 2))
+                print(f"[BAR] {key}: {row['error']}")
+            else:
+                row.update(status="fail", error=f"{type(e).__name__}: {str(e)[:150]}",
+                           elapsed_s=round(time.time() - t0, 2))
+                print(f"[ERR] {key}: {row['error']}")
         rows.append(row)
 
     ok = [r for r in rows if r["status"] == "ok"]
