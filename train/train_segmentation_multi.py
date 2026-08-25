@@ -281,6 +281,50 @@ def _build_chain_targets(curves_json: dict, base_dir: str, axes: tuple,
     return out
 
 
+def _build_chain_targets_x(curves_json: dict, base_dir: str, axes: tuple,
+                           img_size: tuple, k: int = K, sigma: float = 2.0) -> np.ndarray:
+    """Per-ROW x-position chain targets (杠杆 3 x-direction extension).
+
+    Same idea as _build_chain_targets but along the ROW axis: interpolate
+    each curve to every row it spans (y is monotonic in the synthetic
+    creep curves) and render a horizontal Gaussian at the x position.
+    Aligning the per-row x centroid sharpens the curve position along x
+    (steep tails, log-x axes) -- the y-only chain loss leaves x to the
+    implicit skeleton/mask constraint.
+    """
+    w, h = img_size
+    out = np.zeros((k, h, w), np.float32)
+    if not curves_json or "curves" not in curves_json or axes is None:
+        return out
+    x_axis, y_axis = axes
+    xs = np.arange(w, dtype=np.float64)
+    for i, c in enumerate(curves_json["curves"][:k]):
+        csv_path = os.path.join(base_dir, c["csv"])
+        if not os.path.exists(csv_path):
+            continue
+        with open(csv_path, encoding="utf-8") as f:
+            rows = [r for r in csvlib.reader(f) if r and not r[0].startswith("#")]
+        data = np.array([[float(r[0]), float(r[1])] for r in rows[1:]])
+        if len(data) < 2:
+            continue
+        gx = x_axis.value_to_pixel(np.where(data[:, 0] > 0, data[:, 0], 1e-9))
+        gy = y_axis.value_to_pixel(np.where(data[:, 1] > 0, data[:, 1], 1e-9))
+        o = np.argsort(gy)  # rows are monotonic in y
+        gx, gy = gx[o], gy[o]
+        y0, y1 = max(0, int(np.floor(gy[0]))), min(h - 1, int(np.ceil(gy[-1])))
+        if y1 <= y0:
+            continue
+        rows_ = np.arange(y0, y1 + 1)
+        gx_i = np.interp(rows_, gy, gx)
+        for y, xv in zip(rows_, gx_i):
+            if not np.isfinite(xv) or xv < 0 or xv >= w:
+                continue
+            xx = int(round(xv))
+            lo, hi = max(0, xx - 8), min(w, xx + 9)
+            out[i, y, lo:hi] += np.exp(-0.5 * ((xs[lo:hi] - xv) / sigma) ** 2)
+    return out
+
+
 def chain_loss(logit: torch.Tensor, chain_target: torch.Tensor) -> torch.Tensor:
     """Column-position chain loss (杠杆 3), stable variant.
 
@@ -372,13 +416,14 @@ def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
 
 class ChartDataset(Dataset):
     def __init__(self, pairs, augment=False, size=SIZE, cache=None, skel_cache=None,
-                 chain_cache=None):
+                 chain_cache=None, chainx_cache=None):
         self.pairs = pairs
         self.augment = augment
         self.size = size
         self.cache = cache  # dict path -> K-channel mask (for single-curve reuse)
         self.skel_cache = skel_cache  # dict path -> K-channel GT skeleton
         self.chain_cache = chain_cache  # dict path -> (K,H,W) chain targets
+        self.chainx_cache = chainx_cache  # dict path -> (K,H,W) row-wise x targets
 
     def __len__(self):
         return len(self.pairs)
@@ -396,6 +441,7 @@ class ChartDataset(Dataset):
                 meta = json.load(f)
         key = img_path
         chain = None
+        chain_x = None
         if self.cache is not None and key in self.cache:
             inst = self.cache[key]
             skel = (self.skel_cache or {}).get(key)
@@ -405,6 +451,8 @@ class ChartDataset(Dataset):
                     self.skel_cache[key] = skel
             if self.chain_cache is not None and key in self.chain_cache:
                 chain = self.chain_cache[key]
+            if self.chainx_cache is not None and key in self.chainx_cache:
+                chain_x = self.chainx_cache[key]
         else:
             labels = []
             lab_p = img_path[:-4] + "_labels.json"
@@ -452,6 +500,10 @@ class ChartDataset(Dataset):
                 chain = _build_chain_targets(curves_json, os.path.dirname(img_path),
                                              axes, (img.shape[1], img.shape[0]))
                 self.chain_cache[key] = chain
+            if self.chainx_cache is not None and axes is not None:
+                chain_x = _build_chain_targets_x(curves_json, os.path.dirname(img_path),
+                                                 axes, (img.shape[1], img.shape[0]))
+                self.chainx_cache[key] = chain_x
             if self.cache is not None:
                 self.cache[key] = inst
                 if self.skel_cache is not None:
@@ -464,15 +516,19 @@ class ChartDataset(Dataset):
         if chain is not None:
             chain = cv2.resize(chain.transpose(1, 2, 0), (self.size, self.size),
                                interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+        if chain_x is not None:
+            chain_x = cv2.resize(chain_x.transpose(1, 2, 0), (self.size, self.size),
+                                 interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
 
         if self.augment:
-            img, inst, skel, chain = _augment(img, inst, skel, chain)
+            img, inst, skel, chain, chain_x = _augment(img, inst, skel, chain, chain_x)
 
         x = torch.from_numpy(img).float().unsqueeze(0) / 255.0
         y = (torch.from_numpy(inst).float() / 255.0 > 0.5).float()
         s = (torch.from_numpy(skel).float() / 255.0 > 0.5).float()
         c = torch.from_numpy(chain).float() if chain is not None else None
-        return x, y, s, c
+        cx = torch.from_numpy(chain_x).float() if chain_x is not None else None
+        return x, y, s, c, cx
 
 
 def _instance_skeletons(inst: np.ndarray) -> np.ndarray:
@@ -495,8 +551,8 @@ def _instance_skeletons(inst: np.ndarray) -> np.ndarray:
 
 
 def _augment(img: np.ndarray, inst: np.ndarray, skel: np.ndarray = None,
-             chain: np.ndarray = None) -> tuple:
-    """Augment image + K-channel instance masks (and skeletons, chain targets)."""
+             chain: np.ndarray = None, chain_x: np.ndarray = None) -> tuple:
+    """Augment image + K-channel masks (and skeletons, chain targets)."""
     size = img.shape[0]
     if random.random() < 0.5:
         # Horizontal mirror (left-right) of image + K-channel masks.
@@ -513,6 +569,8 @@ def _augment(img: np.ndarray, inst: np.ndarray, skel: np.ndarray = None,
             skel = np.flip(skel, axis=2)[::-1].copy()
         if chain is not None:
             chain = np.flip(chain, axis=2)[::-1].copy()
+        if chain_x is not None:
+            chain_x = np.flip(chain_x, axis=2)[::-1].copy()
     if random.random() < 0.4:
         g = random.uniform(0.8, 1.25)
         b = random.uniform(-25, 25)
@@ -530,6 +588,9 @@ def _augment(img: np.ndarray, inst: np.ndarray, skel: np.ndarray = None,
             if chain is not None:
                 chain[c] = cv2.warpAffine(chain[c], m, (size, size),
                                           flags=cv2.INTER_LINEAR, borderValue=0)
+            if chain_x is not None:
+                chain_x[c] = cv2.warpAffine(chain_x[c], m, (size, size),
+                                            flags=cv2.INTER_LINEAR, borderValue=0)
     if random.random() < 0.25:
         ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, random.randint(60, 90)])
         img = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
@@ -553,12 +614,17 @@ def _augment(img: np.ndarray, inst: np.ndarray, skel: np.ndarray = None,
             chain = np.stack([cv2.resize(chain_c[c], (size, size),
                                          interpolation=cv2.INTER_LINEAR)
                               for c in range(chain.shape[0])])
+        if chain_x is not None:
+            chain_x_c = chain_x[:, y0:y0 + cs, x0:x0 + cs]
+            chain_x = np.stack([cv2.resize(chain_x_c[c], (size, size),
+                                           interpolation=cv2.INTER_LINEAR)
+                                for c in range(chain_x.shape[0])])
     if random.random() < 0.15:
         noise = (np.random.default_rng().random(img.shape) < 0.0008)
         img = img.copy()
         img[noise] = 0
         img[np.random.default_rng().random(img.shape) < 0.0008] = 255
-    return img, inst, skel, chain
+    return img, inst, skel, chain, chain_x
 
 
 def main() -> int:
@@ -626,10 +692,13 @@ def main() -> int:
     cache: dict = {}
     skel_cache: dict = {}
     chain_cache: dict = {}
+    chainx_cache: dict = {}
     train_ds = ChartDataset(pairs, augment=True, size=args.size, cache=cache,
-                            skel_cache=skel_cache, chain_cache=chain_cache)
+                            skel_cache=skel_cache, chain_cache=chain_cache,
+                            chainx_cache=chainx_cache)
     val_ds = ChartDataset(val_pairs, augment=False, size=args.size, cache=cache,
-                          skel_cache=skel_cache, chain_cache=chain_cache)
+                          skel_cache=skel_cache, chain_cache=chain_cache,
+                          chainx_cache=chainx_cache)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=0, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
@@ -681,13 +750,17 @@ def main() -> int:
         model.train()
         t0 = time.time()
         tot_loss, n = 0.0, 0
-        for x, y, s, c in train_loader:
+        for x, y, s, c, cx in train_loader:
             x, y, s = x.to(device), y.to(device), s.to(device)
             chain_batch = None
+            chainx_batch = None
             if args.chain_weight > 0:
                 chain_batch = torch.stack([
                     (ci.to(device) if ci is not None else torch.zeros_like(s[0]))
                     for ci in c])
+                chainx_batch = torch.stack([
+                    (ci.to(device) if ci is not None else torch.zeros_like(s[0]))
+                    for ci in cx])
             opt.zero_grad()
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 # channel weights: empty channels (target all-zero) are
@@ -706,11 +779,15 @@ def main() -> int:
                     den = s.sum(dim=(1, 2, 3)) + 1e-6
                     skel_recall = (num / den).mean()
                     loss = loss + 0.5 * (1.0 - skel_recall)
-                # 杠杆 3: chain loss -- gaussian-band weighted BCE pulling
+                # 杠杆 3: chain loss -- gaussian-band weighted L2 pulling
                 # probability mass to the exact GT curve position (kills the
-                # +0.67px systematic peak offset at the root).
+                # +0.67px systematic peak offset at the root).  The x
+                # direction uses the transposed (per-row) targets.
                 if chain_batch is not None:
                     loss = loss + args.chain_weight * chain_loss(logit, chain_batch)
+                    if chainx_batch is not None:
+                        loss = loss + args.chain_weight * chain_loss(
+                            logit.transpose(2, 3), chainx_batch.transpose(2, 3))
                 # GOI terms (方案 E): intra-class pull + inter-class global
                 # orthogonality on the embedding head (0 when disabled).
                 # 杠杆 1: approach-zone contrastive loss when embed_dim > 0.
@@ -742,7 +819,7 @@ def main() -> int:
         v_dice = v_iou = 0.0
         if len(val_loader):
             with torch.no_grad():
-                for x, y, s, c in val_loader:
+                for x, y, s, c, cx in val_loader:
                     x, y = x.to(device), y.to(device)
                     prob = torch.sigmoid((ema_model or model)(x))
                     d, i = dice_iou(prob, y)

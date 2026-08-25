@@ -262,7 +262,21 @@ def _apply_hard_crossing(curves: list[dict], rng: np.random.Generator) -> None:
     pts_j = np.asarray(cj["data_points"], dtype=np.float64)
     x0, x1 = float(pts_i[0, 0]), float(pts_i[-1, 0])
     span = max(x1 - x0, 1e-9)
-    if rng.random() < 0.5:
+    mode = rng.choice(["cross", "hug", "steep"], p=[0.35, 0.35, 0.3])
+    if mode == "steep":
+        # tertiary tail: exponentially amplify the last 15-35% of the curve
+        # (creep rupture tail, accelerated_obvious failure pattern)
+        x_tail = x0 + rng.uniform(0.65, 0.85) * span
+        k = rng.uniform(2.0, 6.0)
+        m = pts_i[:, 0] >= x_tail
+        if int(m.sum()) >= 8:
+            t = (pts_i[m, 0] - x_tail) / max(span * 0.4, 1e-9)
+            pts_i[m, 1] = pts_i[m, 1] * np.exp(k * np.clip(t, 0.0, 1.0))
+            ymax = max(float(pts_i[:, 1].max()), float(pts_j[:, 1].max())) * 1.3
+            pts_i[:, 1] = np.minimum(pts_i[:, 1], ymax)
+        ci["data_points"] = [[float(v) for v in p] for p in pts_i]
+        return
+    if mode == "cross":
         # ---- cross: shift curve i so it intersects j at a random x ----
         xc = x0 + rng.uniform(0.3, 0.7) * span
         yj = float(np.interp(xc, pts_j[:, 0], pts_j[:, 1]))
