@@ -174,10 +174,11 @@ def test_augment_flip_mirrors_masks_with_image():
     inst = np.zeros((4, 64, 64), np.uint8)
     inst[0, 10, 10] = 255  # channel 0 holds the mark
     skel = inst.copy()
-    oi, om, os_ = _augment(img, inst, skel)
+    oi, om, os_, oc = _augment(img, inst, skel)
     assert oi[10, 63 - 10] == 0          # image horizontally mirrored
     assert om[3, 10, 63 - 10] == 255     # mask mirrored + channel reversed (0 -> 3)
     assert os_[3, 10, 63 - 10] == 255    # skeleton follows the mask
+    assert oc is None                    # chain target None stays None
 
 
 def test_augment_no_flip_keeps_inputs():
@@ -190,8 +191,9 @@ def test_augment_no_flip_keeps_inputs():
     img[10, 10] = 0
     inst = np.zeros((4, 64, 64), np.uint8)
     inst[0, 10, 10] = 255
-    oi, om, os_ = _augment(img, inst, inst.copy())
+    oi, om, os_, oc = _augment(img, inst, inst.copy())
     assert oi[10, 10] == 0 and om[0, 10, 10] == 255 and os_[0, 10, 10] == 255
+    assert oc is None
 
 # ---------------------------------------------------------------------------
 # 方案 E: GOI embedding head + loss + small-cluster merge (2026-08-20)
