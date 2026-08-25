@@ -281,18 +281,26 @@ def _build_chain_targets(curves_json: dict, base_dir: str, axes: tuple,
     return out
 
 
-def chain_loss(prob: torch.Tensor, chain_target: torch.Tensor) -> torch.Tensor:
-    """Column-position chain loss (杠杆 3): per-column probability centroid
-    of each channel vs the GT peak position, L1 over valid columns."""
-    B, K, H, W = prob.shape
-    ys = torch.arange(H, device=prob.device, dtype=torch.float32).view(1, 1, H, 1)
-    p_sum = prob.sum(dim=2, keepdim=True).clamp(min=1e-6)
-    pred_c = (prob * ys).sum(dim=2, keepdim=True) / p_sum          # (B,K,1,W)
-    t_sum = chain_target.sum(dim=2, keepdim=True)
-    t_c = (chain_target * ys).sum(dim=2, keepdim=True) / t_sum.clamp(min=1e-6)
-    valid = (t_sum > 0.5).float()
-    diff = (pred_c - t_c).abs() * valid
-    return diff.sum() / valid.sum().clamp(min=1e-6)
+def chain_loss(logit: torch.Tensor, chain_target: torch.Tensor) -> torch.Tensor:
+    """Column-position chain loss (杠杆 3), stable variant.
+
+    v1 (per-column probability centroid L1) was numerically unstable: the
+    centroid spans the WHOLE column, so background/nearby probabilities pull
+    it away from the GT peak and the gradient direction corrupts the model
+    (val_dice 0.86 -> 0.02 after one epoch, reproduced locally).
+
+    v2: gaussian-band weighted BCE -- pull the logit UP at the GT curve
+    position, weighted by the sigma=2px gaussian so the model concentrates
+    its probability mass at the exact curve location.  No divisions over
+    noisy columns; gradients are bounded like a plain BCE.
+    """
+    band = (chain_target > 0.05).float()
+    if float(band.sum()) < 1.0:
+        return torch.zeros((), device=logit.device)
+    w = chain_target * band  # gaussian weights on the band
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        logit, torch.ones_like(logit), weight=w, reduction="sum")
+    return bce / w.sum().clamp(min=1.0)
 
 
 def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
@@ -695,11 +703,11 @@ def main() -> int:
                     den = s.sum(dim=(1, 2, 3)) + 1e-6
                     skel_recall = (num / den).mean()
                     loss = loss + 0.5 * (1.0 - skel_recall)
-                # 杠杆 3: chain loss -- align per-column probability
-                # centroids with GT curve positions (kills the +0.67px
-                # systematic peak offset at the root).
+                # 杠杆 3: chain loss -- gaussian-band weighted BCE pulling
+                # probability mass to the exact GT curve position (kills the
+                # +0.67px systematic peak offset at the root).
                 if chain_batch is not None:
-                    loss = loss + args.chain_weight * chain_loss(prob, chain_batch)
+                    loss = loss + args.chain_weight * chain_loss(logit, chain_batch)
                 # GOI terms (方案 E): intra-class pull + inter-class global
                 # orthogonality on the embedding head (0 when disabled).
                 # 杠杆 1: approach-zone contrastive loss when embed_dim > 0.
