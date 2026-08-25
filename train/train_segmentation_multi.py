@@ -284,23 +284,26 @@ def _build_chain_targets(curves_json: dict, base_dir: str, axes: tuple,
 def chain_loss(logit: torch.Tensor, chain_target: torch.Tensor) -> torch.Tensor:
     """Column-position chain loss (杠杆 3), stable variant.
 
-    v1 (per-column probability centroid L1) was numerically unstable: the
-    centroid spans the WHOLE column, so background/nearby probabilities pull
-    it away from the GT peak and the gradient direction corrupts the model
-    (val_dice 0.86 -> 0.02 after one epoch, reproduced locally).
-
-    v2: gaussian-band weighted BCE -- pull the logit UP at the GT curve
-    position, weighted by the sigma=2px gaussian so the model concentrates
-    its probability mass at the exact curve location.  No divisions over
-    noisy columns; gradients are bounded like a plain BCE.
+    v1 (centroid L1): background prob pulls the whole-column centroid -> crash.
+    v2 (band BCE): BCE pushes logit -> +inf (unbounded), crashing the model
+        (val 0.65 -> 0.12; also seen locally).
+    v3 (+exclude overlapping columns): still unstable.
+    v4: L2 regression of sigmoid(logit) onto the gaussian band, restricted
+        to columns with a SINGLE active band.  The gradient
+        2*(p-t)*p*(1-p) vanishes as p->1, so the logit never explodes and
+        the loss only sharpens the position; no approach-zone conflict
+        (lever 1 owns those columns).
     """
     band = (chain_target > 0.05).float()
     if float(band.sum()) < 1.0:
         return torch.zeros((), device=logit.device)
-    w = chain_target * band  # gaussian weights on the band
-    bce = torch.nn.functional.binary_cross_entropy_with_logits(
-        logit, torch.ones_like(logit), weight=w, reduction="sum")
-    return bce / w.sum().clamp(min=1.0)
+    col_overlap = (band.sum(dim=1, keepdim=True) > 1.5).float()
+    band_eff = band * (1.0 - col_overlap)
+    if float(band_eff.sum()) < 1.0:
+        return torch.zeros((), device=logit.device)
+    prob = torch.sigmoid(logit)
+    err = ((prob - chain_target) ** 2) * band_eff
+    return err.sum() / band_eff.sum().clamp(min=1.0)
 
 
 def _meta_instance_masks(meta: dict, labels: list, curves_json: dict,
