@@ -134,6 +134,7 @@ main { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
 .b-processing { background: #e8f0fe; color: var(--primary-dark); }
 .b-done { background: #e6f4ea; color: var(--ok); }
 .b-fail { background: #fdecea; color: #c62828; }
+.b-warn { background: #fff4e5; color: #b26a00; }
 
 /* buttons row */
 .btn-row { display: flex; gap: 12px; align-items: center; }

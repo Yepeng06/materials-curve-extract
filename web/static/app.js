@@ -80,10 +80,20 @@ function flash(msg, isErr) {
 }
 
 /* ================= 提取（单图请求，批量串行） ================= */
+function errorMessage(detail, status) {
+  if (detail && typeof detail === "object") {
+    let msg = detail.message || `请求失败（HTTP ${status}）`;
+    if (detail.reject_code) msg += `［${detail.reject_code}］`;
+    if (detail.reject_detail) msg += ` — ${detail.reject_detail}`;
+    return msg;
+  }
+  return typeof detail === "string" ? detail : `请求失败（HTTP ${status}）`;
+}
+
 async function postExtract(fd) {
   const resp = await fetch("/api/extract", { method: "POST", body: fd });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.detail || `请求失败（HTTP ${resp.status}）`);
+  if (!resp.ok) throw new Error(errorMessage(data.detail, resp.status));
   return data;
 }
 
@@ -132,6 +142,9 @@ function renderResultCard(data) {
   const card = document.createElement("div");
   card.className = "result-card";
   const curves = data.curves.map((c) => `曲线${c.index + 1}：${c.n_points} 点`).join(" · ");
+  const qualityBadge = data.quality === "B"
+    ? `<span class="badge b-warn" title="数据已产出但需人工确认">需确认</span>`
+    : `<span class="badge b-done">完成</span>`;
   card.innerHTML = `
     <div class="rc-left">
       <img class="rc-overlay" src="${data.downloads.overlay}?t=${Date.now()}" alt="overlay">
@@ -139,7 +152,7 @@ function renderResultCard(data) {
     </div>
     <div class="rc-right">
       <table class="summary">
-        <tr><td>状态</td><td><span class="badge b-done">完成</span></td></tr>
+        <tr><td>状态</td><td>${qualityBadge}</td></tr>
         <tr><td>图像尺寸</td><td>${data.image_size[0]} × ${data.image_size[1]} px</td></tr>
         <tr><td>曲线</td><td>${data.n_curves} 条（${curves}）</td></tr>
         <tr><td>坐标类型</td><td>x: ${data.x_axis} · y: ${data.y_axis}</td></tr>
@@ -158,6 +171,7 @@ function renderResultCard(data) {
         <a class="btn small" href="${data.downloads.json}" download="${data.filename.replace(/\.[^.]+$/, "")}_result.json">⬇ JSON</a>
         <a class="btn small" href="${data.downloads.overlay}" download="${data.filename.replace(/\.[^.]+$/, "")}_overlay.png">⬇ 叠加图</a>
       </div>
+      ${data.reject_detail ? `<div class="rc-warn">⚠ ${data.reject_detail.replace(/</g, "&lt;")}</div>` : ""}
       ${data.warnings.length ? `<div class="rc-warn">⚠ ${data.warnings.join("；")}</div>` : ""}
     </div>`;
   $("results").prepend(card);

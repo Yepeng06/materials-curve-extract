@@ -93,8 +93,14 @@ def _warm_up_ocr() -> None:
 
 
 def _get_extractor(ocr: str, segmenter: str) -> Extractor:
-    """按请求参数构造提取器；U-Net 模型实例跨请求缓存（加载一次）。"""
-    extractor = Extractor(ocr_backend=ocr, segmenter=segmenter)
+    """按请求参数构造提取器；U-Net 模型实例跨请求缓存（加载一次）。
+
+    quality_gate=True：真实图鲁棒化分级（A/B/C + 原因码，见
+    REAL_ROBUSTNESS_DESIGN.md）。管线默认关闭（合成集回归安全），但 Web
+    面向任意上传图，失败必须可解释 —— 这里显式开启。
+    """
+    extractor = Extractor(ocr_backend=ocr, segmenter=segmenter,
+                          config_override={"quality_gate": True})
     if segmenter == "unet":
         with _segmenter_lock:
             key = ("unet",
@@ -197,7 +203,14 @@ def _run_extraction(image_path: str, ocr: str, segmenter: str,
     try:
         result = extractor.extract(image_path)
     except ExtractionError as e:
-        raise HTTPException(422, f"提取失败: {e}")
+        # 结构化失败原因（quality gate）：422 detail 带原因码与人工建议
+        detail = {
+            "message": f"提取失败: {e}",
+            "quality": getattr(e, "quality", "C"),
+            "reject_code": getattr(e, "reject_code", None),
+            "reject_detail": getattr(e, "reject_detail", None),
+        }
+        raise HTTPException(422, detail=detail)
     except Exception as e:  # 模型/环境错误 → 500
         import traceback
 
@@ -235,6 +248,10 @@ def _run_extraction(image_path: str, ocr: str, segmenter: str,
         "timings": {k: round(v, 3) for k, v in timings.items()},
         "ocr": ocr,
         "segmenter": segmenter,
+        "quality": result.quality,
+        "status": result.status,
+        "reject_code": result.reject_code,
+        "reject_detail": result.reject_detail,
         "downloads": {
             "csv": f"/api/runs/{tid}/csv",
             "json": f"/api/runs/{tid}/json",
