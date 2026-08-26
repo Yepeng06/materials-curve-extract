@@ -672,6 +672,10 @@ def main() -> int:
     ap.add_argument("--chain-weight", type=float, default=0.0,
                     help="杠杆3: chain loss weight - align column probability "
                          "centroids with GT curve positions (0 disables)")
+    ap.add_argument("--right-weight", type=float, default=1.0,
+                    help="E1: right-end mask loss multiplier (x_frac>0.72; "
+                         "1.0 disables). Targets right-end curve loss "
+                         "(chain-model diagnosis: ~50% of >5% failures).")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -780,8 +784,19 @@ def main() -> int:
                 # higher curve channels empty (4/5-curve charts are rarer
                 # in the training distribution)
                 w = (y.sum(dim=(2, 3)) > 0).float() * 0.7 + 0.3
+                # E1: right-end (x_frac > 0.72) pixel-weight multiplier --
+                # the chain model loses curves in the right half under
+                # heavy blur/low-quality screenshots (right-end drift).
+                # Weighting the GT mask pixels there pushes the model to
+                # keep the chain at the exact position in low-confidence
+                # zones.  Passed as per-pixel BCE weight (B, 1, 1, W).
+                px_w = None
+                if args.right_weight > 1.0:
+                    xs = torch.arange(y.shape[3], device=y.device).float()
+                    right = (xs / float(y.shape[3] - 1) > 0.72).float()
+                    px_w = 1.0 + (args.right_weight - 1.0) * right[None, None, None, :]
                 logit, emb = model.forward_embed(x)
-                loss = (bce_dice_loss(logit, y) * w).mean()
+                loss = (bce_dice_loss(logit, y, weight=px_w) * w).mean()
                 # skeleton-recall term (clDice family): penalize missing the
                 # GT skeleton pixels -- directly targets dash/gap/jump
                 # failures on thin structures; only needs the GT skeleton.

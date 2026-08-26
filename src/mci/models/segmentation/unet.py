@@ -85,9 +85,23 @@ class UNet(nn.Module):
         return logit, emb
 
 
-def bce_dice_loss(logit: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """BCE + soft-Dice (target is 0/1 float tensor)."""
+def bce_dice_loss(logit: torch.Tensor, target: torch.Tensor,
+                  weight: torch.Tensor = None) -> torch.Tensor:
+    """BCE + soft-Dice (target is 0/1 float tensor).
+
+    ``weight``: optional per-pixel weight (B, 1, H, W) broadcastable to
+    the logit shape; applied to the BCE term only (Dice stays uniform so
+    the weighted region does not dominate the union statistics).
+    """
     bce = F.binary_cross_entropy_with_logits(logit, target)
+    if weight is not None:
+        # per-pixel weighted BCE (reweighted mean, keeps the scale sane)
+        bce_px = F.binary_cross_entropy_with_logits(
+            logit, target, reduction="none")
+        # weight is (1, 1, 1, W) broadcast over (B, K, H, W): the total
+        # weight mass is weight.sum() * B * K * H
+        wsum = weight.sum() * logit.shape[0] * logit.shape[1] * logit.shape[2]
+        bce = (bce_px * weight).sum() / wsum.clamp(min=1e-6)
     prob = torch.sigmoid(logit)
     inter = (prob * target).sum(dim=(1, 2, 3))
     union = prob.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3)) + 1e-6

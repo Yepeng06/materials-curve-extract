@@ -506,9 +506,17 @@ def render_chart(cfg: dict, curves: list[dict]) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# 退化（baseline 同款 + low_quality_screenshot 截图风）
+# 退化（baseline 同款 + low_quality_screenshot 截图风 + right_fade 右端淡出）
 # ---------------------------------------------------------------------------
-def degrade(img_bgr: np.ndarray, rng: np.random.Generator, screenshot: bool = False) -> tuple:
+def degrade(img_bgr: np.ndarray, rng: np.random.Generator, screenshot: bool = False,
+            right_fade: float = 0.0) -> tuple:
+    """图像退化流水线。
+
+    ``right_fade`` (0-1)：以该概率对图像右端 20-40% 区域做额外的高斯模糊 +
+    对比度降低（模拟"曲线右端概率峰丢失"的真实图模式 —— chain 模型诊断：
+    >5% 桶 ~50% 是右端曲线丢失，集中在重模糊/低质量截图）。GT 掩码不变，
+    模型必须学会在右端低置信区仍保持链的位置精度。
+    """
     applied = []
     img = img_bgr
     if screenshot:
@@ -552,6 +560,19 @@ def degrade(img_bgr: np.ndarray, rng: np.random.Generator, screenshot: bool = Fa
         img[m < 0.0004] = 0
         img[m > 1 - 0.0004] = 255
         applied.append("snp")
+    if right_fade > 0 and rng.random() < right_fade:
+        # 右端 20-40% 区域：高斯模糊 + 对比度降低 + 轻微亮化（模拟照片
+        # 右侧失焦/过曝导致曲线概率峰丢失）
+        w = img.shape[1]
+        x0 = int(w * rng.uniform(0.60, 0.80))
+        region = img[:, x0:]
+        sigma = rng.uniform(1.2, 3.0)
+        region = cv2.GaussianBlur(region, (0, 0), sigma)
+        g = rng.uniform(0.55, 0.85)
+        b = rng.uniform(0, 30)
+        region = np.clip(region.astype(np.float32) * g + b, 0, 255).astype(np.uint8)
+        img[:, x0:] = region
+        applied.append(f"right_fade_{x0 / w:.2f}_{sigma:.2f}")
     return img, applied
 
 
@@ -715,7 +736,8 @@ def generate(args) -> int:
 
                 screenshot = cfg["template_file"] == "low_quality_screenshot"
                 if args.degrade:
-                    img, applied = degrade(img, rng, screenshot=screenshot)
+                    img, applied = degrade(img, rng, screenshot=screenshot,
+                                           right_fade=args.right_fade)
                     gt["degradations"] = applied
                 gt["image_size"] = [int(img.shape[1]), int(img.shape[0])]
 
@@ -780,6 +802,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-degrade", action="store_true", help="不做图像退化")
     ap.add_argument("--hard-crossing", type=float, default=0.0,
                     help="P2: 曲线交叉/贴近困难样本概率 (0-1, 如 0.4)")
+    ap.add_argument("--right-fade", type=float, default=0.0,
+                    help="E1: 右端淡出退化概率 (0-1; 训练模型在右端低置信区保持链)")
     ap.add_argument("--yolo", action="store_true", help="额外输出 YOLOv8 标签")
     args = ap.parse_args(argv)
     args.allow_log = not args.no_log
