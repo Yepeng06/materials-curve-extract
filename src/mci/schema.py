@@ -126,6 +126,13 @@ class ChartStructure:
     x_ticks_px: List[float] = field(default_factory=list)  # sorted, ascending
     y_ticks_px: List[float] = field(default_factory=list)  # sorted, ascending
     meta: dict = field(default_factory=dict)  # detector-specific extras
+    # Real-world robustness (REAL_ROBUSTNESS_DESIGN.md): detected subplot
+    # axis frames as (x0, y0, x1, y1).  Empty for single-panel layouts.
+    panels: List[Tuple[int, int, int, int]] = field(default_factory=list)
+
+    @property
+    def panel_count(self) -> int:
+        return len(self.panels)
 
     @property
     def width(self) -> int:
@@ -167,6 +174,12 @@ class ExtractionResult:
     structure: Optional[ChartStructure] = None
     meta: dict = field(default_factory=dict)  # timings, per-stage diagnostics
     warnings: List[str] = field(default_factory=list)
+    # Real-world robustness triage (REAL_ROBUSTNESS_DESIGN.md).  Backwards
+    # compatible: default "A"/"ok" keeps every existing caller unchanged.
+    quality: str = "A"  # "A" | "B" | "C"
+    status: str = "ok"  # "ok" | "partial" | "rejected"
+    reject_code: Optional[str] = None  # stable reason code (quality_gate)
+    reject_detail: Optional[str] = None  # human-readable reason + hint
 
     @property
     def success(self) -> bool:

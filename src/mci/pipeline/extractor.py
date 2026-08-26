@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import yaml
 
-from ..schema import ExtractionResult, ExtractionError
+from ..schema import AxisFitError, ExtractionResult, ExtractionError
 from ..utils import read_image
 from .base import TextBox
 from .chart_structure import detect_structure
@@ -76,6 +76,14 @@ def _build_ocr(backend: str, image_path: str) -> object:
         return StubOCRBackend(labels)
 
 
+def _read_image_for_gate(image_path: str) -> Optional[np.ndarray]:
+    """Best-effort image read for the quality gate on the failure path."""
+    try:
+        return read_image(image_path)
+    except Exception:
+        return None
+
+
 class Extractor:
     def __init__(self, config_path: Optional[str] = None, ocr_backend: Optional[str] = None,
                  segmenter: Optional[str] = None, debug_dir: Optional[str] = None,
@@ -112,6 +120,28 @@ class Extractor:
 
     # ------------------------------------------------------------------
     def extract(self, image_path: str) -> ExtractionResult:
+        """Run the pipeline; on failure re-raise the original ``ExtractionError``.
+
+        When ``config.quality_gate`` is enabled (real-world robustness mode,
+        see REAL_ROBUSTNESS_DESIGN.md), failures are additionally annotated
+        with structured ``reject_code`` / ``reject_detail`` / ``quality``
+        attributes so callers can triage A/B/C without parsing messages.
+        """
+        try:
+            return self._extract_inner(image_path)
+        except ExtractionError as e:
+            # a stage may already have attached an explainable code (e.g.
+            # categorical axis in _extract_inner); don't overwrite it
+            if not getattr(e, "reject_code", None) and self.cfg.get("quality_gate"):
+                from .quality_gate import classify_failure
+
+                verdict = classify_failure(_read_image_for_gate(image_path), error=e)
+                e.reject_code = verdict.reject_code  # type: ignore[attr-defined]
+                e.reject_detail = verdict.reject_detail  # type: ignore[attr-defined]
+                e.quality = verdict.quality  # type: ignore[attr-defined]
+            raise
+
+    def _extract_inner(self, image_path: str) -> ExtractionResult:
         timings: Dict[str, float] = {}
         warnings: List[str] = []
         t0 = time.time()
@@ -180,13 +210,27 @@ class Extractor:
             titles = {}
         x_hint = titles.get("x_label", {}).get("log_hint", "") or self.cfg.get("x_kind_hint", "auto")
         y_hint = titles.get("y_label", {}).get("log_hint", "") or self.cfg.get("y_kind_hint", "auto")
-        x_axis, y_axis = build_axes(
-            x_ticks, y_ticks,
-            x_hint,
-            y_hint,
-            x_endpoints=(float(structure.y_axis_pixel), float(x1)),
-            y_endpoints=(float(y0), float(structure.x_axis_pixel)),
-        )
+        try:
+            x_axis, y_axis = build_axes(
+                x_ticks, y_ticks,
+                x_hint,
+                y_hint,
+                x_endpoints=(float(structure.y_axis_pixel), float(x1)),
+                y_endpoints=(float(y0), float(structure.x_axis_pixel)),
+            )
+        except AxisFitError:
+            # T2b: non-numeric (categorical) axis -> explainable reason
+            # instead of a generic "not enough ticks" failure.
+            from .quality_gate import CODE_OCR_CATEGORICAL_AXIS, is_categorical_axis
+            from .quality_gate import _HINTS  # noqa: PLC2701 (stable hint table)
+
+            if is_categorical_axis(x_ticks) or is_categorical_axis(y_ticks):
+                exc = AxisFitError("categorical axis detected")
+                exc.reject_code = CODE_OCR_CATEGORICAL_AXIS  # type: ignore[attr-defined]
+                exc.reject_detail = _HINTS[CODE_OCR_CATEGORICAL_AXIS]  # type: ignore[attr-defined]
+                exc.quality = "B"  # type: ignore[attr-defined]
+                raise exc
+            raise
         timings["axes"] = time.time() - t
         meta_titles = {k: {kk: vv for kk, vv in v.items() if kk != "center"}
                        for k, v in titles.items()}
@@ -217,6 +261,16 @@ class Extractor:
         meta = {"timings": timings, "ocr_backend": type(ocr).__name__,
                 "titles": meta_titles}
 
+        # Real-world robustness: attach detected panels (only when enabled;
+        # success path behaviour is otherwise unchanged).
+        if self.cfg.get("quality_gate"):
+            from .panel_detect import detect_panels
+
+            try:
+                structure.panels = detect_panels(image)
+            except Exception:
+                pass
+
         result = ExtractionResult(
             image_path=image_path,
             x_axis=x_axis,
@@ -226,6 +280,19 @@ class Extractor:
             meta=meta,
             warnings=warnings,
         )
+
+        # Real-world robustness: demote to B when an axis fit is weak
+        # (linear/log judgement or mapping quality) — only when enabled.
+        if self.cfg.get("quality_gate"):
+            from .quality_gate import CODE_AXIS_TYPE_AMBIGUOUS, classify_success
+
+            min_axis_q = float(self.cfg.get("quality_min_axis_r2", 0.95))
+            worst_q = min(x_axis.quality, y_axis.quality)
+            verdict = classify_success(axis_quality=worst_q if worst_q < min_axis_q else None)
+            result.quality = verdict.quality
+            result.status = verdict.status
+            result.reject_code = verdict.reject_code
+            result.reject_detail = verdict.reject_detail
 
         if self.debug_dir:
             self._save_debug(image, result, ocr)
