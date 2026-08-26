@@ -26,6 +26,7 @@ multi_independent_mask: true  # candidate C phase 1: no argmax exclusion at cros
 multi_embed_merge: true       # 方案 E: GOI embedding small-cluster merge (unet_multi_goi.pt 起默认开)
 multi_refine_radius: 6        # P1: skip window-centroid refine in approach zones (0.7352 -> 0.7444)
 multi_refine_bias_y: -0.67
+multi_truncate_lowconf: false   # P3: cut right-end drift tails (diagnosis 2026-08-26; off by default)
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot

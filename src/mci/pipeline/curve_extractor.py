@@ -582,6 +582,78 @@ def extract_curves(
     )
     return [curve]
 
+def _truncate_lowconf_tail(chain, prob, other_masks, min_len: int = 40,
+                           thr: float = 0.12, window: int = 24,
+                           conf_lookback: int = 12):
+    """Cut chain tails that drifted into empty space (right-end curve loss).
+
+    Chain model diagnosis (2026-08-26): ~50% of the >5% failures are
+    "right-end loss" -- the predicted chain gradually leaves the GT in the
+    right/back half of the image, stays inside the plot, does NOT jump onto
+    another GT curve (onOther ~ 0), and keeps walking at a wrong height in
+    empty space.  The model's probability in that region is low and the
+    chain is far from every other channel mask.
+
+    Rule: scan from the chain tail backwards; while the mean probability
+    over a trailing window is below ``thr`` AND the chain is far (>6px)
+    from every other channel's mask, keep cutting.  Stop early as soon as
+    the chain is either confident (mean >= thr) or near another mask (the
+    near-mask case is an approach zone, not a drift tail).
+
+    The GT curve keeps its full x-span in the metric (the evaluator
+    interpolates over the intersection of GT and pred x-ranges), so cutting
+    a drifted tail strictly reduces RMSE.
+    """
+    if len(chain) < min_len + window:
+        return chain
+    pts = np.asarray(chain, dtype=np.float64)  # (N, 2) pixel coords
+    n = len(pts)
+    cut = n
+    # confidence per chain point: nearest-neighbor sample of prob
+    conf = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        x = int(round(pts[i, 0]))
+        y = int(round(pts[i, 1]))
+        h, w = prob.shape
+        if 0 <= y < h and 0 <= x < w:
+            conf[i] = float(prob[y, x])
+    # distance to nearest other-channel mask per point (sampled every 4)
+    near = np.zeros(n, dtype=bool)
+    if other_masks:
+        dist_map = None
+        for m in other_masks:
+            if m is None:
+                continue
+            d = _distance_map(m)
+            if dist_map is None:
+                dist_map = d
+            else:
+                dist_map = np.minimum(dist_map, d)
+        if dist_map is not None:
+            h, w = dist_map.shape
+            for i in range(0, n):
+                x = int(round(pts[i, 0]))
+                y = int(round(pts[i, 1]))
+                if 0 <= y < h and 0 <= x < w:
+                    near[i] = dist_map[y, x] <= 6.0
+    for i in range(n - window, min_len, -1):
+        seg = conf[i - window:i]
+        if seg.mean() < thr and not bool(near[i - window:i].any()):
+            cut = i
+            continue
+        break
+    if cut >= n - 2:
+        return chain
+    if cut < min_len:
+        return chain[:min_len] if min_len < n else chain
+    return chain[:cut]
+
+
+def _distance_map(mask: np.ndarray) -> np.ndarray:
+    from scipy.ndimage import distance_transform_edt
+    return distance_transform_edt(1.0 - (mask > 0))
+
+
 def _truncate_jumps(chain, max_jump: float = 30.0, min_len: int = 40):
     """Cut chain tails where y jumps abruptly and keeps jumping.
 
@@ -834,6 +906,16 @@ def extract_curves_multi(    image_bgr: np.ndarray,
             continue
         if trunc:
             chain = _truncate_jumps(chain)
+        # P3: right-end low-confidence tail truncation (chain-model
+        # diagnosis: ~50% of >5% failures are right-end drift into empty
+        # space; cutting the drifted tail strictly reduces RMSE).
+        if bool(cfg.get("multi_truncate_lowconf", False)):
+            others = [masks[j] for j in range(len(masks)) if j != c]
+            chain = _truncate_lowconf_tail(
+                chain, region, others,
+                min_len=int(cfg.get("multi_truncate_lowconf_minlen", 40)),
+                thr=float(cfg.get("multi_truncate_lowconf_thr", 0.12)),
+                window=int(cfg.get("multi_truncate_lowconf_window", 24)))
         # S1b: empirical pixel-bias calibration (measured +0.67 px systematic
         # offset of the model's probability peak on the synthetic set;
         # ~1.34% rel on log axes).  Applied in pixel space before mapping.
