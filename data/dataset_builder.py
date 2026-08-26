@@ -566,10 +566,10 @@ def degrade(img_bgr: np.ndarray, rng: np.random.Generator, screenshot: bool = Fa
         w = img.shape[1]
         x0 = int(w * rng.uniform(0.60, 0.80))
         region = img[:, x0:]
-        sigma = rng.uniform(1.2, 3.0)
+        sigma = rng.uniform(1.0, 2.2)
         region = cv2.GaussianBlur(region, (0, 0), sigma)
-        g = rng.uniform(0.55, 0.85)
-        b = rng.uniform(0, 30)
+        g = rng.uniform(0.60, 0.90)
+        b = rng.uniform(0, 25)
         region = np.clip(region.astype(np.float32) * g + b, 0, 255).astype(np.uint8)
         img[:, x0:] = region
         applied.append(f"right_fade_{x0 / w:.2f}_{sigma:.2f}")
