@@ -1,0 +1,3 @@
+#!/bin/bash
+# Post-train download & local eval for an E-series checkpoint
+# Usage (local, after training finishes):  F:\anaconda3\envs\mci\python.exe autodl.py download...
