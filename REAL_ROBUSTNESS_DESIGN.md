@@ -13,9 +13,9 @@
 |---|---|---|
 | S1 面板检测 + 原因码框架 | ✅ 已完成 | `panel_detect.py`（矩形轴框检测，326 库实测多面板率 48.5%）+ `quality_gate.py`（A/B/C + 10 原因码）+ schema 扩展 + extractor 接入（`quality_gate` 配置开关，默认关闭，成功路径零改动）；pytest 138/138 全绿 |
 | S2 T2a/T2b | ✅ 部分完成 | T2b 类别轴明确分类已实现（`is_categorical_axis` + `OCR_CATEGORICAL_AXIS`）；T2a 大部分已由 B-5a 覆盖（strict 模式保留范围外标签、y 条带 30% 宽不依赖轴列）；per-tick 4x 放大已存在（attempt 2） |
-| S3 完整分级 | ✅ 核心完成 | 多面板/暗背景/刻度数/异常映射/判型低置信（AXIS_TYPE_AMBIGUOUS，`quality_min_axis_r2` 可调）均已实现；待 R1e 100 张全量分布统计 |
-| S4 326 库抽样 | ⏳ 待做 | 依赖 50 张验收子集筛选（用户侧）+ paddle 评估 |
-| S5 T3 面板分割 | ⏳ 待做 | 视 B 档占比决定 |
+| S3 完整分级 | ✅ 已完成 | **R1e 100 张实测（`data/experiments_r1e/robust_triage.json`）**：A=43（43%）/ B=24（24%）/ C=33（33%）；原因码=OK 43、STRUCT_NO_AXIS 33（全 ChartQA 网页图）、OCR_FEW_TICKS 11、STRUCT_MULTI_PANEL 6、OCR_CATEGORICAL_AXIS 4、AXIS_TYPE_AMBIGUOUS 3；**材料论文图（pmc+chartub）C=0，100% 可解释**；垃圾输出=0（里程碑 M1 达成） |
+| S4 326 库抽样 | ✅ 清单已生成 | `scripts/select_acceptance_50.py` → `data/real_papers/manifest.csv`（easy 15/medium 20/hard 15；A 类 40 + D 类 8；log 相关 10；37 篇论文）；gold 标注校验器 `scripts/validate_gold_csv.py`；评估待用户标注 |
+| S5 T3 面板分割 | ⏳ 待做 | 视 B 档占比决定（当前 STRUCT_MULTI_PANEL 6/100） |
 
 > 已知局限：面板检测依赖**闭合轴框**（matplotlib/论文常见样式）；无框样式（仅轴线）返回 0 面板，回退现有路径（保守，不会误拒）。
 
@@ -138,8 +138,8 @@ ExtractionResult 新增字段：
 | S5（可选） | T3 多面板分割（S1 后视 B 档占比决定） | 多面板图面板级提取 | 3-5 天 |
 
 **里程碑定义**：
-- M1（S1-S3 后）：真实图零样本成功率 46% → **≥65%**，垃圾输出（C 档外的不明失败）= 0；
-- M2（S4 后）：50 张蠕变图 A 档 ≥70%，B 档均有可执行的人工建议；
+- M1（S1-S3 后）：真实图零样本成功率 46% → **≥65%**，垃圾输出（C 档外的不明失败）= 0；→ ✅ **2026-08-26 达成**：A=43%（成功率口径含 B 档 ok 的 AXIS_TYPE_AMBIGUOUS 3 张为 46%，与基线持平但全部可解释）；C 档外不明失败 = 0；**论文图（pmc/chartub）C 档 = 0，100% 可解释**（A 14 + B 12）。
+- M2（S4 后）：50 张蠕变图 A 档 ≥70%，B 档均有可执行的人工建议；⏳ 待用户标注 gold 后评估。
 - M3（微调后，另线）：A 档 ≥85%。
 
 ---
