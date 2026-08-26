@@ -18,15 +18,16 @@ y_kind_hint: auto
 segmenter: multi_unet      # cv | unet | multi_unet (2026-08-20: 默认多曲线，最新成果)
 unet_checkpoint: models/checkpoints/unet_curve.pt
 unet_size: 512              # inference resolution (must match training resolution)
-multi_unet_checkpoint: models/checkpoints/unet_multi_chain.pt
-multi_mask_thr: 0.3         # multi-channel mask threshold
+multi_unet_checkpoint: models/checkpoints/unet_multi_e1m.pt
+multi_mask_thr: 0.35         # multi-channel mask threshold (E1m 最优 0.35)
 multi_truncate_jumps: true  # cut chain tails that left the curve
 multi_min_area: 450         # ghost-channel suppression (px; 0 = off)
 multi_independent_mask: true  # candidate C phase 1: no argmax exclusion at crossings
 multi_embed_merge: true       # 方案 E: GOI embedding small-cluster merge (unet_multi_goi.pt 起默认开)
-multi_refine_radius: 6        # P1: skip window-centroid refine in approach zones (0.7352 -> 0.7444)
+multi_refine_radius: 4        # P1: skip window-centroid refine in approach zones (E1m 最优 4)
 multi_refine_bias_y: -0.67
-multi_truncate_lowconf: false   # P3: cut right-end drift tails (diagnosis 2026-08-26; off by default)
+multi_truncate_lowconf: true   # P3: cut right-end drift tails (E1m 组合最优)
+multi_truncate_lowconf_thr: 0.18  # P3: drift-tail confidence threshold
 
 # ---- curve extraction ----
 min_curve_area: 60          # min connected-component area inside the plot
