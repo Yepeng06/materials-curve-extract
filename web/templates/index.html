@@ -3,75 +3,178 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>材料曲线智能提取 — Web 演示</title>
-<link rel="stylesheet" href="/static/style.css">
+<title>材料曲线工作台</title>
+<link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 <header>
-  <h1>材料科学图像曲线智能识别与解析</h1>
-  <p class="sub">上传曲线图（支持批量）→ 一键提取 → 叠加图展示 → 结构化数据下载</p>
+  <div class="header-inner">
+    <div>
+      <h1>材料曲线工作台</h1>
+      <p class="sub">提取论文/实验曲线图，或合成带像素级标注的训练数据</p>
+    </div>
+    <nav class="tabs" id="main-tabs">
+      <button type="button" class="tab active" data-view="extract">曲线提取</button>
+      <button type="button" class="tab" data-view="synth">数据合成</button>
+    </nav>
+  </div>
 </header>
 
 <main>
-  <!-- 上传区 -->
-  <section class="card" id="upload-card">
-    <h2>① 上传曲线图（支持多选 / 批量拖拽）</h2>
-    <div class="dropzone" id="dropzone">
-      <input type="file" id="file-input" accept=".png,.jpg,.jpeg" multiple hidden>
-      <div class="dz-inner" id="dz-inner">
-        <div class="dz-icon">📈</div>
-        <p>点击选择 或 拖拽图片到此处（可一次多张）</p>
-        <p class="hint">支持 PNG / JPG，单张 ≤ 20 MB</p>
+  <div id="view-extract">
+    <section class="card" id="upload-card">
+      <h2>上传曲线图</h2>
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".png,.jpg,.jpeg" multiple hidden>
+        <div class="dz-inner" id="dz-inner">
+          <div class="dz-icon">📈</div>
+          <p>点击选择或拖拽图片（可一次多张）</p>
+          <p class="hint">PNG / JPG，单张 ≤ 20 MB</p>
+        </div>
       </div>
-    </div>
-    <ul class="file-list" id="file-list" hidden></ul>
+      <ul class="file-list" id="file-list" hidden></ul>
 
-    <h2>② 提取参数</h2>
-    <div class="param-row">
-      <label>刻度 OCR
-        <select id="ocr-select">
-          <option value="stub" selected>快速（标准答案刻度；上传图自动切换真实 OCR）</option>
-          <option value="paddle">真实识别（PaddleOCR，首次约 10-30s 加载模型）</option>
-        </select>
-      </label>
-      <label>曲线分割
-        <select id="segmenter-select">
-          <option value="multi_unet" selected>多曲线 U-Net（最新成果，推荐）</option>
-          <option value="unet">单曲线深度学习 U-Net</option>
-          <option value="cv">经典 CV（训练免，精度较低）</option>
-        </select>
-      </label>
-    </div>
+      <h2>提取参数</h2>
+      <div class="param-row">
+        <label>刻度 OCR
+          <select id="ocr-select">
+            <option value="stub" selected>快速（示例图用标准答案；上传图自动切真实 OCR）</option>
+            <option value="paddle">真实识别（PaddleOCR）</option>
+          </select>
+        </label>
+        <label>曲线分割
+          <select id="segmenter-select">
+            <option value="multi_unet" selected>多曲线 U-Net（推荐）</option>
+            <option value="unet">单曲线 U-Net</option>
+            <option value="cv">经典 CV</option>
+          </select>
+        </label>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary big grow" id="btn-extract" disabled>
+          <span id="btn-label">批量提取（0 张）</span>
+        </button>
+        <button class="btn ghost" id="btn-clear-files" disabled>清空列表</button>
+      </div>
+      <p class="status" id="status"></p>
+    </section>
 
-    <div class="btn-row">
-      <button class="btn primary big grow" id="btn-extract" disabled>
-        <span id="btn-label">③ 批量提取（0 张）</span>
-      </button>
-      <button class="btn ghost" id="btn-clear-files" disabled>清空列表</button>
-    </div>
-    <p class="status" id="status"></p>
-  </section>
+    <section class="card" id="result-card" hidden>
+      <div class="result-head">
+        <h2>提取结果</h2>
+        <button class="btn ghost" id="btn-clear-results">清空结果</button>
+      </div>
+      <div id="results"></div>
+    </section>
 
-  <!-- 结果区 -->
-  <section class="card" id="result-card" hidden>
-    <div class="result-head">
-      <h2>提取结果</h2>
-      <button class="btn ghost" id="btn-clear-results">清空结果</button>
-    </div>
-    <div id="results"></div>
-  </section>
+    <section class="card" id="examples-card">
+      <h2>示例图（点击即提取）</h2>
+      <div class="examples" id="examples"></div>
+    </section>
+  </div>
 
-  <!-- 示例图 -->
-  <section class="card" id="examples-card">
-    <h2>快捷测试（示例图，点击即提取）</h2>
-    <div class="examples" id="examples"></div>
-  </section>
+  <div id="view-synth" class="hidden">
+    <div class="layout">
+      <section class="panel card">
+        <h2>统一生成器</h2>
+        <p class="hint">生成单/多曲线图及 PNG / CSV / mask / meta / labels，无需外部依赖。</p>
+
+        <label>生成数量 <span class="req">1–500</span>
+          <input type="number" id="count" value="20" min="1" max="500" />
+        </label>
+        <label>随机种子
+          <input type="number" id="seed" value="20260828" />
+        </label>
+
+        <fieldset>
+          <legend>曲线类型（可多选）</legend>
+          <div class="checks">
+            <label><input type="checkbox" class="ct" value="creep" checked /> 蠕变式</label>
+            <label><input type="checkbox" class="ct" value="power" checked /> 幂律</label>
+            <label><input type="checkbox" class="ct" value="sigmoid" checked /> S 型</label>
+            <label><input type="checkbox" class="ct" value="relax" checked /> 应力松弛</label>
+            <label><input type="checkbox" class="ct" value="logcurve" checked /> 对数型</label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>坐标轴</legend>
+          <label>X 轴
+            <select id="xaxis">
+              <option value="both" selected>线性 + 对数混合</option>
+              <option value="linear">仅线性</option>
+              <option value="log">仅对数</option>
+            </select>
+          </label>
+          <label>Y 轴
+            <select id="yaxis">
+              <option value="both" selected>线性 + 对数混合</option>
+              <option value="linear">仅线性</option>
+              <option value="log">仅对数</option>
+            </select>
+          </label>
+        </fieldset>
+
+        <label>曲线数 <span class="req">1–5</span>
+          <select id="num-curves">
+            <option value="1" selected>1（单曲线，可直接评估）</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+          </select>
+        </label>
+        <label>DPI
+          <select id="dpi">
+            <option value="random" selected>随机 (150/200/300)</option>
+            <option value="150">150</option>
+            <option value="200">200</option>
+            <option value="300">300</option>
+          </select>
+        </label>
+        <label>线型
+          <select id="ls">
+            <option value="both" selected>实线 + 虚线混合</option>
+            <option value="solid">仅实线</option>
+            <option value="dashed">仅虚线</option>
+          </select>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="degrade" checked /> 启用图像退化（JPEG / 模糊 / 噪声）
+        </label>
+        <button id="btn-generate" class="primary">开始生成</button>
+        <div id="gen-error" class="error"></div>
+      </section>
+
+      <section class="panel card result">
+        <div id="task-status" class="status idle">尚未生成任务</div>
+        <div id="progress-wrap" class="hidden">
+          <div class="bar"><div id="progress-bar"></div></div>
+          <div id="progress-text" class="ptext"></div>
+        </div>
+        <div id="result-actions" class="hidden">
+          <a id="btn-download" class="btn" href="#">下载全部数据 (ZIP)</a>
+        </div>
+        <h3>预览（点击可放大）</h3>
+        <div id="gallery" class="gallery"></div>
+        <details class="logbox">
+          <summary>生成日志</summary>
+          <pre id="gen-log"></pre>
+        </details>
+      </section>
+    </div>
+  </div>
 </main>
 
 <footer>
-  <p>materials-curve-intel · U-Net 512 + 坐标映射引擎 · 合成数据驱动 · 竞赛展示版</p>
+  <p>materials-curve-intel · 提取 + 合成一体化工作台</p>
 </footer>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=5"></script>
+<script src="/static/synthesis.js?v=5"></script>
+<div id="lightbox" class="lightbox hidden" onclick="closeLightbox()">
+  <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
+  <img id="lightbox-img" class="lightbox-img" />
+</div>
 </body>
 </html>

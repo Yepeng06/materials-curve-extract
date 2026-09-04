@@ -147,7 +147,20 @@ function renderResultCard(data) {
     : `<span class="badge b-done">完成</span>`;
   card.innerHTML = `
     <div class="rc-left">
-      <img class="rc-overlay" src="${data.downloads.overlay}?t=${Date.now()}" alt="overlay">
+      <div class="rc-image-row">
+        <div class="rc-image-col">
+          <div class="rc-img-label">原图</div>
+          <img class="rc-overlay" src="${data.downloads.image}?t=${Date.now()}" alt="原图" style="cursor:pointer" onclick="openLightbox('${data.downloads.image}?t=${Date.now()}')">
+        </div>
+        <div class="rc-image-col">
+          <div class="rc-img-label">重绘图（提取点 → 再绘曲线）</div>
+          <img class="rc-overlay" src="${data.downloads.redraw}?t=${Date.now()}" alt="重绘" onerror="this.closest('.rc-image-col').style.display='none'" style="cursor:pointer" onclick="openLightbox('${data.downloads.redraw}?t=${Date.now()}')">
+        </div>
+        <div class="rc-image-col">
+          <div class="rc-img-label">叠加图（原图 + 提取曲线）</div>
+          <img class="rc-overlay" src="${data.downloads.overlay}?t=${Date.now()}" alt="叠加" style="cursor:pointer" onclick="openLightbox('${data.downloads.overlay}?t=${Date.now()}')">
+        </div>
+      </div>
       <div class="rc-name" title="${data.filename}">${data.filename}</div>
     </div>
     <div class="rc-right">
@@ -169,7 +182,9 @@ function renderResultCard(data) {
       <div class="downloads">
         <a class="btn small" href="${data.downloads.csv}" download="${data.filename.replace(/\.[^.]+$/, "")}_curves.csv">⬇ CSV</a>
         <a class="btn small" href="${data.downloads.json}" download="${data.filename.replace(/\.[^.]+$/, "")}_result.json">⬇ JSON</a>
+        <a class="btn small" href="${data.downloads.image}" download="${data.filename.replace(/\.[^.]+$/, "")}_original.png">⬇ 原图</a>
         <a class="btn small" href="${data.downloads.overlay}" download="${data.filename.replace(/\.[^.]+$/, "")}_overlay.png">⬇ 叠加图</a>
+        <a class="btn small" href="${data.downloads.redraw}" download="${data.filename.replace(/\.[^.]+$/, "")}_redraw.png">⬇ 重绘图</a>
       </div>
       ${data.reject_detail ? `<div class="rc-warn">⚠ ${data.reject_detail.replace(/</g, "&lt;")}</div>` : ""}
       ${data.warnings.length ? `<div class="rc-warn">⚠ ${data.warnings.join("；")}</div>` : ""}
@@ -247,3 +262,36 @@ async function loadExamples() {
   }
 }
 loadExamples();
+
+/* ================= 工作台切页 ================= */
+(function initTabs() {
+  const tabs = document.getElementById("main-tabs");
+  if (!tabs) return;
+  const extract = document.getElementById("view-extract");
+  const synth = document.getElementById("view-synth");
+  tabs.addEventListener("click", (e) => {
+    const btn = e.target.closest(".tab");
+    if (!btn) return;
+    const view = btn.dataset.view;
+    tabs.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === btn));
+    if (extract) extract.classList.toggle("hidden", view !== "extract");
+    if (synth) synth.classList.toggle("hidden", view !== "synth");
+    if (view === "synth") location.hash = "synth";
+    else history.replaceState(null, "", location.pathname);
+  });
+  if (location.hash === "#synth") {
+    const btn = tabs.querySelector('.tab[data-view="synth"]');
+    if (btn) btn.click();
+  }
+})();
+
+/* ================= Lightbox 放大查看 ================= */
+window.openLightbox = function (url) {
+  var lb = document.getElementById("lightbox");
+  var img = document.getElementById("lightbox-img");
+  if (lb && img) { img.src = url; lb.classList.remove("hidden"); }
+};
+window.closeLightbox = function () {
+  var lb = document.getElementById("lightbox");
+  if (lb) lb.classList.add("hidden");
+};

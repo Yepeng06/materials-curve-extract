@@ -1,6 +1,7 @@
 # runtime outputs
 data/*
 web/runs/
+web/synthesis_runs/
 web/*.log
 *.png
 *.jpg
