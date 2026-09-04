@@ -13,6 +13,7 @@ def _axis_to_dict(axis):
         "kind": axis.kind.value,
         "slope": axis.slope,
         "intercept": axis.intercept,
+        "sign": axis.sign,
         "vmin": axis.vmin,
         "vmax": axis.vmax,
         "pmin": axis.pmin,
@@ -38,6 +39,9 @@ def write_json(result: ExtractionResult, out_path: str) -> str:
                 "color": list(c.color),
                 "legend_label": c.legend_label,
                 "points": [[x, y] for x, y in c.points],
+                # image-pixel trace of the exported points (manual-correction
+                # editor anchors); same length as "points" where available
+                "pixel_points": [[int(px), int(py)] for px, py in c.pixel_points],
             }
             for c in result.curves
         ],

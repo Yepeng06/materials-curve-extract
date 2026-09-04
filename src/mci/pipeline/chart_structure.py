@@ -16,7 +16,7 @@ the YOLO version will return the same ``ChartStructure`` dataclass.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -41,13 +41,25 @@ def _group_runs(values: np.ndarray, gap: int = 3) -> List[float]:
     return centers
 
 
-def detect_structure(image_bgr: np.ndarray, cfg: Dict | None = None) -> ChartStructure:
+def detect_structure(image_bgr: np.ndarray, cfg: Dict | None = None,
+                     exclude_mask: Optional[np.ndarray] = None) -> ChartStructure:
+    """Classical-CV structure detection.
+
+    ``exclude_mask`` (optional, bool/uint8 same HxW as ``image_bgr``): pixels
+    set to True/non-zero are treated as NON-ink, so embedded tables, annotation
+    text and captions detected by the plot-region front-end cannot be mistaken
+    for axes / tick labels.  When None (default) behaviour is unchanged.
+    """
     cfg = cfg or {}
     frac_thr = float(cfg.get("axis_frac_threshold", 0.45))
     edge_frac = float(cfg.get("axis_edge_exclude", 0.03))
     h, w = image_bgr.shape[:2]
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     ink = ink_mask(gray)
+    if exclude_mask is not None:
+        em = np.asarray(exclude_mask, dtype=bool)
+        if em.shape == ink.shape:
+            ink[em] = 0
 
     # ---- horizontal profile over the central 92% width -> bottom axis ----
     cx0, cx1 = int(w * 0.04), int(w * 0.96)

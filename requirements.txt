@@ -8,6 +8,11 @@ scipy>=1.10
 matplotlib>=3.7
 pyyaml>=6.0
 
+# --- web workbench (web/app.py) ---
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+
 # --- optional: batch evaluation ---
 pandas>=2.0
 tqdm>=4.60

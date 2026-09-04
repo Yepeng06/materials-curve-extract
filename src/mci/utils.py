@@ -22,6 +22,23 @@ _SCI_2 = re.compile(r"^10" + _EXP + r"$")  # 10^3 / 10-3 / 10^-3 (NOT plain '100
 _PERCENT = re.compile(r"^([+-]?\d*\.?\d+)%?$")
 
 
+# Confusable glyph → digit map (applied ONLY when the whole token otherwise
+# fails to parse and every char is a known confusable: OCR of small tick
+# fonts misreads 0/O/o, 1/l/I, 5/S, 8/B, 6/b, 9/g).
+_CONFUSABLE = str.maketrans({
+    "O": "0", "o": "0", "l": "1", "I": "1", "S": "5", "B": "8",
+    "b": "6", "g": "9", "Z": "2", "z": "2",
+})
+
+# Common trailing units / decorations on tick or axis-corner labels that
+# parse_number_text may still meet ('10 MPa', '0.5 mm', '~25', '>100').
+_TRAILING_UNITS = (
+    "MPa", "GPa", "kPa", "Pa", "mm", "cm", "km", "µm", "μm", "um",
+    "min", "sec", "ms", "ks", "hr", "°C", "°F", "K", "h", "s", "%",
+    "C", "F",
+)
+
+
 def read_image(path: str) -> np.ndarray:
     """Read an image file as BGR uint8. Raises ValueError on failure."""
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -58,8 +75,12 @@ def parse_number_text(text: Optional[str]) -> Optional[float]:
 
     Handles: plain floats, thousands separators, '1e-3', '1.5x10^3',
     '10^-3', unicode superscripts ('10⁻³', '10⁰'), unicode minus signs,
-    a trailing '%', and matplotlib mathtext markup (e.g.
-    '$\\mathdefault{10^{-2}}$').  Returns None when not a number.
+    a trailing '%', matplotlib mathtext markup (e.g.
+    '$\\mathdefault{10^{-2}}$'), plus the L4 extensions: '±'/'~'/'>'/'<'
+    prefixes, '°', trailing unit tokens ('10 MPa' -> 10), uppercase 'E'
+    notation, and confusable-glyph tokens ('l0' -> 10) — the latter only
+    when every char is a known confusable and the result parses.
+    Returns None when not a number.
     """
     if not text:
         return None
@@ -70,6 +91,11 @@ def parse_number_text(text: Optional[str]) -> Optional[float]:
     s = s.replace("⁻", "-").replace("−", "-").replace("–", "-").replace("—", "-")
     s = s.translate(_SUPERSCRIPT)
     s = s.replace(",", "").replace(" ", "").replace("×", "x").replace("✕", "x")
+    # L4: leading approximation/comparison markers, degree signs, ± ranges
+    s = s.lstrip("~≈><≥≤±")
+    s = s.replace("°", "")
+    if not s:
+        return None
 
     m = _SCI_1.match(s)
     if m:
@@ -91,7 +117,27 @@ def parse_number_text(text: Optional[str]) -> Optional[float]:
     try:
         return float(s)
     except ValueError:
-        return None
+        pass
+    # L4: trailing unit token ('10MPa' -> 10; '%' already handled above)
+    for u in _TRAILING_UNITS:
+        if s.endswith(u) and len(s) > len(u):
+            tail = s[:-len(u)]
+            if tail and tail[-1] in "+-":
+                tail = tail[:-1]
+            try:
+                return float(tail)
+            except ValueError:
+                pass
+            break
+    # L4: confusable-glyph rescue — only if EVERY char maps to a digit/sign
+    rescue = s.translate(_CONFUSABLE)
+    if rescue != s and rescue and all(
+            c.isdigit() or c in "+-." for c in rescue):
+        try:
+            return float(rescue)
+        except ValueError:
+            pass
+    return None
 
 
 def downsample_chain(chain: List[Tuple[int, int]], max_points: int) -> List[Tuple[int, int]]:

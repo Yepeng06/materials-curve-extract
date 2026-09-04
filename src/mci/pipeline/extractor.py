@@ -14,14 +14,24 @@ import cv2
 import numpy as np
 import yaml
 
-from ..schema import AxisFitError, ExtractionResult, ExtractionError
+from ..schema import (
+    AxisFitError,
+    ExtractionResult,
+    ExtractionError,
+    StructureDetectionError,
+)
 from ..utils import read_image
 from .base import TextBox
 from .chart_structure import detect_structure
 from .detector import YoloStructureDetector
 from .coordinate_mapper import build_axes
-from .curve_extractor import extract_curves
+from .curve_extractor import CurveExtractionError, extract_curves, extract_curves_multi
 from .legend_matcher import match_legends
+from .plot_region import (
+    PlotRegionDetector,
+    YoloPlotRegionDetector,
+    detect_structure_region,
+)
 from .tick_reader import PaddleOCRBackend, StubOCRBackend, read_ticks
 from .title_reader import read_rotated_y_title, read_titles
 
@@ -40,12 +50,21 @@ DEFAULTS = {
     "x_kind_hint": "auto",
     "y_kind_hint": "auto",
     "ocr_backend": "auto",  # auto | paddle | stub
-    "segmenter": "cv",  # cv | unet | multi_unet
+    "ocr_tier": "server",  # server (PP-OCRv5) | mobile (PP-OCRv4 fallback)
+    "segmenter": "cv",  # cv | unet | multi_unet | auto
     "unet_checkpoint": "models/checkpoints/unet_curve.pt",
     "multi_unet_checkpoint": "models/checkpoints/unet_multi_curve.pt",
     "unet_size": 256,  # inference resolution (must match training resolution)
     "structure_backend": "cv",  # cv | yolo (Phase B-4)
     "yolo_weights": "models/detection/yolo_struct.pt",
+    # Level-0 plot-region front-end (see 参考/方案_曲线提取结构检测组件化检测.md).
+    # "none" keeps the behaviour identical to before this change; set to
+    # "yolo" (and provide region_weights) to crop to the detected plot area
+    # and mask out embedded tables / annotation text / captions before the
+    # classical-CV structure detector runs.
+    "region_backend": "none",  # none | yolo
+    "region_weights": "models/detection/yolo_region.pt",
+    "region_min_conf": 0.30,
     "debug": False,
 }
 
@@ -60,17 +79,17 @@ def load_config(path: Optional[str] = None) -> Dict:
     return cfg
 
 
-def _build_ocr(backend: str, image_path: str) -> object:
+def _build_ocr(backend: str, image_path: str, tier: str = "server") -> object:
     if backend == "stub":
         labels = os.path.splitext(image_path)[0] + "_labels.json"
         return StubOCRBackend(labels)
     if backend == "paddle":
-        return PaddleOCRBackend(lang="en", device="auto")
+        return PaddleOCRBackend(lang="en", device="auto", tier=tier)
     # auto: paddle if installed, else stub sidecar
     try:
         import paddleocr  # noqa: F401
 
-        return PaddleOCRBackend(lang="en", device="auto")
+        return PaddleOCRBackend(lang="en", device="auto", tier=tier)
     except ImportError:
         labels = os.path.splitext(image_path)[0] + "_labels.json"
         return StubOCRBackend(labels)
@@ -99,7 +118,10 @@ class Extractor:
         if self.debug_dir:
             os.makedirs(self.debug_dir, exist_ok=True)
         self._segmenter = None
+        self._single_segmenter = None  # auto mode: single-curve U-Net
+        self._multi_segmenter = None   # auto mode: multi-curve U-Net
         self._structure_detector = None
+        self._region_detector: Optional[PlotRegionDetector] = None
 
     def _get_segmenter(self):
         if self._segmenter is None and self.cfg.get("segmenter") == "unet":
@@ -117,6 +139,112 @@ class Extractor:
                 size=int(self.cfg.get("unet_size", 256)),
             )
         return self._segmenter
+
+    def _get_single_segmenter(self):
+        """Single-curve U-Net (auto mode, cached per extractor instance)."""
+        if self._single_segmenter is None:
+            from .segmenter import UNetSegmenter
+
+            self._single_segmenter = UNetSegmenter(
+                self.cfg.get("unet_checkpoint"),
+                size=int(self.cfg.get("unet_size", 512)),
+            )
+        return self._single_segmenter
+
+    def _get_multi_segmenter(self):
+        """Multi-curve U-Net (auto mode, cached per extractor instance)."""
+        if self._multi_segmenter is None:
+            from .segmenter import MultiUNetSegmenter
+
+            self._multi_segmenter = MultiUNetSegmenter(
+                self.cfg.get("multi_unet_checkpoint",
+                             "models/checkpoints/unet_multi_curve.pt"),
+                size=int(self.cfg.get("unet_size", 512)),
+            )
+        return self._multi_segmenter
+
+    def _extract_auto(self, image, structure, x_axis, y_axis):
+        """Auto single/multi-curve backend selection.
+
+        Strategy (zero extra training): the multi-channel U-Net doubles as a
+        curve COUNTER — the number of surviving channels IS the instance
+        count (same instance-segmentation counting argument as LineFormer/
+        LineEX).  >= 2 channels  -> multi result kept as-is;
+        exactly 1 channel        -> re-extract with the (higher-precision)
+        single-curve U-Net and keep whichever yields a curve;
+        0 channels / model error -> single U-Net, then classical CV fallback.
+
+        Returns ``(curves, backend_name)`` with backend in
+        {"multi", "single", "cv"}.
+        """
+        def _multi():
+            return extract_curves_multi(image, structure, x_axis, y_axis,
+                                        self.cfg, self._get_multi_segmenter())
+
+        def _single():
+            return extract_curves(image, structure, x_axis, y_axis,
+                                  self.cfg, segmenter=self._get_single_segmenter())
+
+        def _cv():
+            return extract_curves(image, structure, x_axis, y_axis, self.cfg)
+
+        try:
+            multi_curves = _multi()
+        except Exception:
+            multi_curves = []
+        n_multi = len(multi_curves)
+        if n_multi >= 2:
+            return multi_curves, "multi"
+
+        # 0 or 1 surviving channels: try the single-curve model.
+        try:
+            single_curves = _single()
+        except Exception:
+            single_curves = []
+        if n_multi == 1 and len(single_curves) >= 1:
+            return single_curves, "single"
+        if n_multi == 0 and len(single_curves) >= 1:
+            return single_curves, "single"
+        if n_multi == 1:
+            return multi_curves, "multi"  # only the multi path found anything
+
+        # Nothing learned worked -> classical CV (training-free).
+        try:
+            return _cv(), "cv"
+        except CurveExtractionError:
+            raise
+
+    # ------------------------------------------------------------------
+    def _get_region_detector(self) -> Optional[PlotRegionDetector]:
+        """Lazily build the Level-0 plot-region detector (or None).
+
+        Returns None when ``region_backend`` is not ``yolo`` or when the
+        weights are missing / ultralytics is unavailable, so the rest of the
+        pipeline runs exactly as before.
+        """
+        if self._region_detector is not None:
+            return self._region_detector
+        self._region_detector = None
+        if self.cfg.get("region_backend") == "yolo":
+            try:
+                det = YoloPlotRegionDetector(self.cfg.get("region_weights", ""))
+                if det.available:
+                    self._region_detector = det
+            except Exception:
+                self._region_detector = None
+        return self._region_detector
+
+    def _detect_structure_inner(self, image: np.ndarray):
+        """Original structure branch (cv | yolo), kept for fallback."""
+        if self.cfg.get("structure_backend") == "yolo":
+            if self._structure_detector is None:
+                from .detector import YoloStructureDetector
+
+                self._structure_detector = YoloStructureDetector(
+                    self.cfg.get("yolo_weights", ""),
+                )
+            return self._structure_detector.detect(image)
+        return detect_structure(image, self.cfg)
 
     # ------------------------------------------------------------------
     def extract(self, image_path: str) -> ExtractionResult:
@@ -151,21 +279,27 @@ class Extractor:
 
         # 1. structure
         t = time.time()
-        if self.cfg.get("structure_backend") == "yolo":
-            if self._structure_detector is None:
-                from .detector import YoloStructureDetector
-
-                self._structure_detector = YoloStructureDetector(
-                    self.cfg.get("yolo_weights", ""),
+        region_detector = self._get_region_detector()
+        if region_detector is not None:
+            # Level-0 plot-region front-end: crop to the detected data area
+            # and mask out embedded tables / annotation text, then run the
+            # existing structure detector inside that clean region.  Any
+            # detector failure falls back to the unchanged CV/YOLO path.
+            try:
+                structure = detect_structure_region(
+                    image, self.cfg, region_detector,
+                    min_conf=float(self.cfg.get("region_min_conf", 0.30)),
                 )
-            structure = self._structure_detector.detect(image)
+            except StructureDetectionError:
+                structure = self._detect_structure_inner(image)
         else:
-            structure = detect_structure(image, self.cfg)
+            structure = self._detect_structure_inner(image)
         timings["structure"] = time.time() - t
 
         # 2. ticks
         t = time.time()
-        ocr = _build_ocr(self.cfg["ocr_backend"], image_path)
+        ocr = _build_ocr(self.cfg["ocr_backend"], image_path,
+                         tier=str(self.cfg.get("ocr_tier", "server")))
         try:
             x_ticks, y_ticks = read_ticks(image, structure, ocr, self.cfg)
         except ExtractionError as e:
@@ -241,9 +375,12 @@ class Extractor:
 
         # 4. curve extraction (cv heuristics or learned U-Net segmentation)
         t = time.time()
-        if self.cfg.get("segmenter") == "multi_unet":
-            from .curve_extractor import extract_curves_multi
-
+        auto_backend_used = None
+        seg_name = self.cfg.get("segmenter")
+        if seg_name == "auto":
+            curves, auto_backend_used = self._extract_auto(
+                image, structure, x_axis, y_axis)
+        elif seg_name == "multi_unet":
             curves = extract_curves_multi(image, structure, x_axis, y_axis,
                                           self.cfg, self._get_segmenter())
         else:
@@ -260,6 +397,8 @@ class Extractor:
         timings["total"] = time.time() - t0
         meta = {"timings": timings, "ocr_backend": type(ocr).__name__,
                 "titles": meta_titles}
+        if auto_backend_used is not None:
+            meta["auto_segmenter"] = auto_backend_used
 
         # Real-world robustness: attach detected panels (only when enabled;
         # success path behaviour is otherwise unchanged).

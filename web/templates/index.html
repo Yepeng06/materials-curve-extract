@@ -4,174 +4,211 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>材料曲线工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=5">
+<link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
-<header>
-  <div class="header-inner">
-    <div>
-      <h1>材料曲线工作台</h1>
-      <p class="sub">提取论文/实验曲线图，或合成带像素级标注的训练数据</p>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">📊</div>
+      <div>
+        <div class="brand-name">材料曲线工作台</div>
+        <div class="brand-sub">materials-curve-intel</div>
+      </div>
     </div>
-    <nav class="tabs" id="main-tabs">
-      <button type="button" class="tab active" data-view="extract">曲线提取</button>
-      <button type="button" class="tab" data-view="synth">数据合成</button>
+    <nav class="nav" id="main-nav">
+      <button type="button" class="nav-item active" data-view="extract">
+        <span class="nav-ico">📈</span>曲线提取
+      </button>
+      <button type="button" class="nav-item" data-view="synth">
+        <span class="nav-ico">🧪</span>数据合成
+      </button>
     </nav>
-  </div>
-</header>
-
-<main>
-  <div id="view-extract">
-    <section class="card" id="upload-card">
-      <h2>上传曲线图</h2>
-      <div class="dropzone" id="dropzone">
-        <input type="file" id="file-input" accept=".png,.jpg,.jpeg" multiple hidden>
-        <div class="dz-inner" id="dz-inner">
-          <div class="dz-icon">📈</div>
-          <p>点击选择或拖拽图片（可一次多张）</p>
-          <p class="hint">PNG / JPG，单张 ≤ 20 MB</p>
-        </div>
-      </div>
-      <ul class="file-list" id="file-list" hidden></ul>
-
-      <h2>提取参数</h2>
-      <div class="param-row">
-        <label>刻度 OCR
-          <select id="ocr-select">
-            <option value="stub" selected>快速（示例图用标准答案；上传图自动切真实 OCR）</option>
-            <option value="paddle">真实识别（PaddleOCR）</option>
-          </select>
-        </label>
-        <label>曲线分割
-          <select id="segmenter-select">
-            <option value="multi_unet" selected>多曲线 U-Net（推荐）</option>
-            <option value="unet">单曲线 U-Net</option>
-            <option value="cv">经典 CV</option>
-          </select>
-        </label>
-      </div>
-      <div class="btn-row">
-        <button class="btn primary big grow" id="btn-extract" disabled>
-          <span id="btn-label">批量提取（0 张）</span>
-        </button>
-        <button class="btn ghost" id="btn-clear-files" disabled>清空列表</button>
-      </div>
-      <p class="status" id="status"></p>
-    </section>
-
-    <section class="card" id="result-card" hidden>
-      <div class="result-head">
-        <h2>提取结果</h2>
-        <button class="btn ghost" id="btn-clear-results">清空结果</button>
-      </div>
-      <div id="results"></div>
-    </section>
-
-    <section class="card" id="examples-card">
-      <h2>示例图（点击即提取）</h2>
-      <div class="examples" id="examples"></div>
-    </section>
-  </div>
-
-  <div id="view-synth" class="hidden">
-    <div class="layout">
-      <section class="panel card">
-        <h2>统一生成器</h2>
-        <p class="hint">生成单/多曲线图及 PNG / CSV / mask / meta / labels，无需外部依赖。</p>
-
-        <label>生成数量 <span class="req">1–500</span>
-          <input type="number" id="count" value="20" min="1" max="500" />
-        </label>
-        <label>随机种子
-          <input type="number" id="seed" value="20260828" />
-        </label>
-
-        <fieldset>
-          <legend>曲线类型（可多选）</legend>
-          <div class="checks">
-            <label><input type="checkbox" class="ct" value="creep" checked /> 蠕变式</label>
-            <label><input type="checkbox" class="ct" value="power" checked /> 幂律</label>
-            <label><input type="checkbox" class="ct" value="sigmoid" checked /> S 型</label>
-            <label><input type="checkbox" class="ct" value="relax" checked /> 应力松弛</label>
-            <label><input type="checkbox" class="ct" value="logcurve" checked /> 对数型</label>
-          </div>
-        </fieldset>
-
-        <fieldset>
-          <legend>坐标轴</legend>
-          <label>X 轴
-            <select id="xaxis">
-              <option value="both" selected>线性 + 对数混合</option>
-              <option value="linear">仅线性</option>
-              <option value="log">仅对数</option>
-            </select>
-          </label>
-          <label>Y 轴
-            <select id="yaxis">
-              <option value="both" selected>线性 + 对数混合</option>
-              <option value="linear">仅线性</option>
-              <option value="log">仅对数</option>
-            </select>
-          </label>
-        </fieldset>
-
-        <label>曲线数 <span class="req">1–5</span>
-          <select id="num-curves">
-            <option value="1" selected>1（单曲线，可直接评估）</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-            <option value="5">5</option>
-          </select>
-        </label>
-        <label>DPI
-          <select id="dpi">
-            <option value="random" selected>随机 (150/200/300)</option>
-            <option value="150">150</option>
-            <option value="200">200</option>
-            <option value="300">300</option>
-          </select>
-        </label>
-        <label>线型
-          <select id="ls">
-            <option value="both" selected>实线 + 虚线混合</option>
-            <option value="solid">仅实线</option>
-            <option value="dashed">仅虚线</option>
-          </select>
-        </label>
-        <label class="switch">
-          <input type="checkbox" id="degrade" checked /> 启用图像退化（JPEG / 模糊 / 噪声）
-        </label>
-        <button id="btn-generate" class="primary">开始生成</button>
-        <div id="gen-error" class="error"></div>
-      </section>
-
-      <section class="panel card result">
-        <div id="task-status" class="status idle">尚未生成任务</div>
-        <div id="progress-wrap" class="hidden">
-          <div class="bar"><div id="progress-bar"></div></div>
-          <div id="progress-text" class="ptext"></div>
-        </div>
-        <div id="result-actions" class="hidden">
-          <a id="btn-download" class="btn" href="#">下载全部数据 (ZIP)</a>
-        </div>
-        <h3>预览（点击可放大）</h3>
-        <div id="gallery" class="gallery"></div>
-        <details class="logbox">
-          <summary>生成日志</summary>
-          <pre id="gen-log"></pre>
-        </details>
-      </section>
+    <div class="sidebar-foot">
+      <span class="ver">mci-web-2.1</span><br>U-Net 512 · OCR v5 · 提取+合成一体化
     </div>
-  </div>
-</main>
+  </aside>
 
-<footer>
-  <p>materials-curve-intel · 提取 + 合成一体化工作台</p>
+  <main class="workspace">
+    <!-- ============ 曲线提取 ============ -->
+    <div id="view-extract" class="view">
+      <div class="extract-grid">
+        <!-- 左列：上传 + 参数 + 示例 -->
+        <div class="col-left">
+          <section class="card">
+            <h2>上传曲线图</h2>
+            <div class="dropzone" id="dropzone">
+              <input type="file" id="file-input" accept=".png,.jpg,.jpeg" multiple hidden>
+              <div class="dz-inner">
+                <div class="dz-icon">📈</div>
+                <p>点击选择或拖拽图片（可多张）</p>
+                <p class="hint">PNG / JPG，单张 ≤ 20 MB</p>
+              </div>
+            </div>
+            <ul class="file-list" id="file-list" hidden></ul>
+          </section>
+
+          <section class="card">
+            <h2>提取参数</h2>
+            <label class="fld">曲线分割模型
+              <select id="segmenter-select">
+                <option value="auto" selected>自动判断（推荐：自动识别单/多曲线）</option>
+                <option value="multi_unet">多曲线 U-Net（手动）</option>
+                <option value="unet">单曲线 U-Net（手动）</option>
+                <option value="cv">经典 CV（免训练）</option>
+              </select>
+            </label>
+            <label class="fld">导出点数
+              <select id="points-select">
+                <option value="4">4 点</option>
+                <option value="16">16 点</option>
+                <option value="32">32 点</option>
+                <option value="64">64 点</option>
+                <option value="128" selected>128 点（默认，对齐申报书）</option>
+                <option value="0">原生密度（全量）</option>
+              </select>
+            </label>
+            <label class="fld">刻度 OCR
+              <select id="ocr-select">
+                <option value="stub" selected>快速（示例图用标准答案；上传图自动切真实 OCR）</option>
+                <option value="paddle">真实识别（PaddleOCR v5）</option>
+              </select>
+            </label>
+            <div class="btn-row">
+              <button class="btn primary big grow" id="btn-extract" disabled>
+                <span id="btn-label">批量提取（0 张）</span>
+              </button>
+              <button class="btn ghost" id="btn-clear-files" disabled>清空</button>
+            </div>
+            <p class="status" id="status"></p>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <h2>示例图（点击即提取）</h2>
+              <button class="btn ghost" id="btn-refresh-examples" title="随机换一批示例图">🔄 换一批</button>
+            </div>
+            <div class="examples" id="examples"></div>
+          </section>
+        </div>
+
+        <!-- 右列：结果 -->
+        <div class="col-right">
+          <section class="card" id="result-card" hidden>
+            <div class="card-head">
+              <h2>提取结果</h2>
+              <button class="btn ghost" id="btn-clear-results">清空结果</button>
+            </div>
+            <div id="results"></div>
+          </section>
+          <div id="result-empty" class="empty-hint">
+            <div class="empty-ico">🗂️</div>
+            <p>提取结果将显示在这里</p>
+            <p class="hint">上传图片或点击左侧示例图开始</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 数据合成 ============ -->
+    <div id="view-synth" class="view hidden">
+      <div class="synth-grid">
+        <section class="card">
+          <h2>统一生成器</h2>
+          <p class="hint">生成单/多曲线图及 PNG / CSV / mask / meta / labels，无需外部依赖。</p>
+          <label class="fld">生成数量 <span class="req">1–500</span>
+            <input type="number" id="count" value="20" min="1" max="500" />
+          </label>
+          <label class="fld">随机种子
+            <input type="number" id="seed" value="20260828" />
+          </label>
+          <fieldset>
+            <legend>曲线类型（可多选）</legend>
+            <div class="checks">
+              <label><input type="checkbox" class="ct" value="creep" checked /> 蠕变式</label>
+              <label><input type="checkbox" class="ct" value="power" checked /> 幂律</label>
+              <label><input type="checkbox" class="ct" value="sigmoid" checked /> S 型</label>
+              <label><input type="checkbox" class="ct" value="relax" checked /> 应力松弛</label>
+              <label><input type="checkbox" class="ct" value="logcurve" checked /> 对数型</label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>坐标轴</legend>
+            <label class="fld">X 轴
+              <select id="xaxis">
+                <option value="both" selected>线性 + 对数混合</option>
+                <option value="linear">仅线性</option>
+                <option value="log">仅对数</option>
+              </select>
+            </label>
+            <label class="fld">Y 轴
+              <select id="yaxis">
+                <option value="both" selected>线性 + 对数混合</option>
+                <option value="linear">仅线性</option>
+                <option value="log">仅对数</option>
+              </select>
+            </label>
+          </fieldset>
+          <label class="fld">曲线数 <span class="req">1–5</span>
+            <select id="num-curves">
+              <option value="1" selected>1（单曲线，可直接评估）</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+          <label class="fld">DPI
+            <select id="dpi">
+              <option value="random" selected>随机 (150/200/300)</option>
+              <option value="150">150</option>
+              <option value="200">200</option>
+              <option value="300">300</option>
+            </select>
+          </label>
+          <label class="fld">线型
+            <select id="ls">
+              <option value="both" selected>实线 + 虚线混合</option>
+              <option value="solid">仅实线</option>
+              <option value="dashed">仅虚线</option>
+            </select>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="degrade" checked /> 启用图像退化（JPEG / 模糊 / 噪声）
+          </label>
+          <button id="btn-generate" class="primary">开始生成</button>
+          <div id="gen-error" class="error"></div>
+        </section>
+
+        <section class="card result">
+          <div id="task-status" class="status idle">尚未生成任务</div>
+          <div id="progress-wrap" class="hidden">
+            <div class="bar"><div id="progress-bar"></div></div>
+            <div id="progress-text" class="ptext"></div>
+          </div>
+          <div id="result-actions" class="hidden">
+            <a id="btn-download" class="btn" href="#">下载全部数据 (ZIP)</a>
+          </div>
+          <h3>预览（点击可放大）</h3>
+          <div id="gallery" class="gallery"></div>
+          <details class="logbox">
+            <summary>生成日志</summary>
+            <pre id="gen-log"></pre>
+          </details>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<footer class="foot">
+  <p>materials-curve-intel · 曲线提取 + 数据合成 + 人工校正一体化工作台（离线可用）</p>
 </footer>
 
-<script src="/static/app.js?v=5"></script>
-<script src="/static/synthesis.js?v=5"></script>
+<script src="/static/vendor/konva.min.js?v=9"></script>
+<script src="/static/app.js?v=6"></script>
+<script src="/static/corrector.js?v=6"></script>
+<script src="/static/synthesis.js?v=6"></script>
 <div id="lightbox" class="lightbox hidden" onclick="closeLightbox()">
   <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
   <img id="lightbox-img" class="lightbox-img" />

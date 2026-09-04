@@ -1,4 +1,4 @@
-/* 材料曲线智能提取 — 前端逻辑（单图 + 批量） */
+/* 材料曲线工作台 — 提取前端（上传/批量/结果/内嵌校正入口） */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -7,6 +7,28 @@ const fileInput = $("file-input");
 
 let fileList = [];          // 待提取文件 [{file, name, size, status}]
 let busy = false;           // 提取任务进行中
+
+/* ================= 导航（提取 / 合成） ================= */
+(function initNav() {
+  const nav = $("main-nav");
+  if (!nav) return;
+  const extract = $("view-extract");
+  const synth = $("view-synth");
+  nav.addEventListener("click", (e) => {
+    const btn = e.target.closest(".nav-item");
+    if (!btn) return;
+    const view = btn.dataset.view;
+    nav.querySelectorAll(".nav-item").forEach((t) => t.classList.toggle("active", t === btn));
+    if (extract) extract.classList.toggle("hidden", view !== "extract");
+    if (synth) synth.classList.toggle("hidden", view !== "synth");
+    if (view === "synth") location.hash = "synth";
+    else history.replaceState(null, "", location.pathname);
+  });
+  if (location.hash === "#synth") {
+    const btn = nav.querySelector('.nav-item[data-view="synth"]');
+    if (btn) btn.click();
+  }
+})();
 
 /* ================= 上传（多文件） ================= */
 function addFiles(files) {
@@ -47,7 +69,7 @@ function renderFileList() {
   const n = fileList.length;
   $("btn-extract").disabled = n === 0 || busy;
   $("btn-clear-files").disabled = n === 0;
-  $("btn-label").textContent = `③ 批量提取（${n} 张）`;
+  $("btn-label").textContent = `批量提取（${n} 张）`;
 }
 
 function badgeText(s) {
@@ -97,12 +119,21 @@ async function postExtract(fd) {
   return data;
 }
 
+function currentParams() {
+  return {
+    ocr: $("ocr-select").value,
+    segmenter: $("segmenter-select").value,
+    points: parseInt($("points-select").value, 10) || 0,
+  };
+}
+
 async function extractAll() {
   if (busy || fileList.length === 0) return;
   busy = true;
   const btn = $("btn-extract");
   btn.classList.add("loading");
   $("btn-clear-files").disabled = true;
+  const params = currentParams();
 
   for (let i = 0; i < fileList.length; i++) {
     const it = fileList[i];
@@ -113,8 +144,9 @@ async function extractAll() {
 
     const fd = new FormData();
     fd.append("file", it.file);
-    fd.append("ocr", $("ocr-select").value);
-    fd.append("segmenter", $("segmenter-select").value);
+    fd.append("ocr", params.ocr);
+    fd.append("segmenter", params.segmenter);
+    fd.append("points", params.points);
     try {
       const data = await postExtract(fd);
       renderResultCard(data);
@@ -127,9 +159,8 @@ async function extractAll() {
 
   busy = false;
   btn.classList.remove("loading");
-  $("btn-label").textContent = `③ 批量提取（${fileList.length} 张）`;
+  $("btn-label").textContent = `批量提取（${fileList.length} 张）`;
   $("btn-clear-files").disabled = fileList.length === 0;
-  $("result-card").hidden = false;
   flash("批量提取完成", false);
   $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -137,14 +168,36 @@ async function extractAll() {
 $("btn-extract").addEventListener("click", extractAll);
 
 /* ================= 结果渲染（卡片列表） ================= */
+function segmenterLabel(data) {
+  const seg = data.segmenter;
+  const auto = data.auto_segmenter;
+  if (seg === "auto") {
+    const name = { multi: "多曲线 U-Net", single: "单曲线 U-Net", cv: "经典 CV" }[auto] || auto || "—";
+    return `自动判定 → ${name}`;
+  }
+  return { unet: "单曲线 U-Net", multi_unet: "多曲线 U-Net", cv: "经典 CV" }[seg] || seg;
+}
+
+function pointsLabel(data) {
+  if (!data.points_param || data.points_param <= 0) return "原生密度";
+  const total = (data.curves || []).reduce((s, c) => s + (c.n_points_exported || 0), 0);
+  return `${data.points_param} 点/条（已重采样，共 ${total} 点）`;
+}
+
 function renderResultCard(data) {
   $("result-card").hidden = false;
+  $("result-empty").classList.add("hidden");
   const card = document.createElement("div");
   card.className = "result-card";
+  card.dataset.tid = data.task_id;
   const curves = data.curves.map((c) => `曲线${c.index + 1}：${c.n_points} 点`).join(" · ");
   const qualityBadge = data.quality === "B"
     ? `<span class="badge b-warn" title="数据已产出但需人工确认">需确认</span>`
-    : `<span class="badge b-done">完成</span>`;
+    : data.status === "corrected"
+      ? `<span class="badge b-done">已校正</span>`
+      : `<span class="badge b-done">完成</span>`;
+  const autoBadge = data.segmenter === "auto"
+    ? `<span class="badge b-auto">自动识别 ${data.n_curves} 条曲线</span>` : "";
   card.innerHTML = `
     <div class="rc-left">
       <div class="rc-image-row">
@@ -162,22 +215,19 @@ function renderResultCard(data) {
         </div>
       </div>
       <div class="rc-name" title="${data.filename}">${data.filename}</div>
+      <!-- 校正编辑器挂载点 -->
+      <div class="corr-wrap" data-corr></div>
     </div>
     <div class="rc-right">
       <table class="summary">
-        <tr><td>状态</td><td>${qualityBadge}</td></tr>
+        <tr><td>状态</td><td>${qualityBadge} ${autoBadge}</td></tr>
         <tr><td>图像尺寸</td><td>${data.image_size[0]} × ${data.image_size[1]} px</td></tr>
         <tr><td>曲线</td><td>${data.n_curves} 条（${curves}）</td></tr>
         <tr><td>坐标类型</td><td>x: ${data.x_axis} · y: ${data.y_axis}</td></tr>
-        ${data.titles && (data.titles.title || data.titles.x_label || data.titles.y_label) ? `
-        <tr><td>标题/轴标题</td><td>
-          ${data.titles.title ? `标题: ${data.titles.title.text} ` : ''}
-          ${data.titles.x_label ? `X: ${data.titles.x_label.text} ` : ''}
-          ${data.titles.y_label ? `Y: ${data.titles.y_label.text}` : ''}
-        </td></tr>` : ''}
+        <tr><td>导出点数</td><td>${pointsLabel(data)}</td></tr>
         <tr><td>提取耗时</td><td>${data.elapsed_s}s</td></tr>
-        <tr><td>OCR 后端</td><td>${data.ocr === "paddle" ? "真实识别（PaddleOCR）" : "标准答案（stub）"}</td></tr>
-        <tr><td>分割模型</td><td>${data.segmenter === "unet" ? "深度学习 U-Net" : data.segmenter === "multi_unet" ? "多曲线 U-Net" : "经典 CV"}</td></tr>
+        <tr><td>OCR 后端</td><td>${data.ocr === "paddle" ? "真实识别（PaddleOCR v5）" : "标准答案（stub）"}</td></tr>
+        <tr><td>分割模型</td><td>${segmenterLabel(data)}</td></tr>
       </table>
       <div class="downloads">
         <a class="btn small" href="${data.downloads.csv}" download="${data.filename.replace(/\.[^.]+$/, "")}_curves.csv">⬇ CSV</a>
@@ -186,14 +236,25 @@ function renderResultCard(data) {
         <a class="btn small" href="${data.downloads.overlay}" download="${data.filename.replace(/\.[^.]+$/, "")}_overlay.png">⬇ 叠加图</a>
         <a class="btn small" href="${data.downloads.redraw}" download="${data.filename.replace(/\.[^.]+$/, "")}_redraw.png">⬇ 重绘图</a>
       </div>
+      <button class="btn primary" data-corr-btn title="在原图上查看并人工校正提取点（拖拽/加点/删点）">✏️ 人工校正</button>
       ${data.reject_detail ? `<div class="rc-warn">⚠ ${data.reject_detail.replace(/</g, "&lt;")}</div>` : ""}
-      ${data.warnings.length ? `<div class="rc-warn">⚠ ${data.warnings.join("；")}</div>` : ""}
+      ${(data.warnings || []).length ? `<div class="rc-warn">⚠ ${data.warnings.join("；")}</div>` : ""}
     </div>`;
   $("results").prepend(card);
+  // 绑定校正按钮
+  const corrBtn = card.querySelector("[data-corr-btn]");
+  corrBtn.addEventListener("click", () => {
+    if (typeof window.Corrector === "undefined") {
+      flash("校正编辑器未加载（缺少 Konva）", true);
+      return;
+    }
+    window.Corrector.toggle(card, data);
+  });
 }
 
 function renderResultError(name, msg) {
   $("result-card").hidden = false;
+  $("result-empty").classList.add("hidden");
   const card = document.createElement("div");
   card.className = "result-card rc-error";
   card.innerHTML = `
@@ -206,45 +267,13 @@ function renderResultError(name, msg) {
 $("btn-clear-results").addEventListener("click", () => {
   $("results").innerHTML = "";
   $("result-card").hidden = true;
+  $("result-empty").classList.remove("hidden");
 });
 
-/* ================= 示例图 ================= */
-async function extractExample(group, name) {
-  if (busy) {
-    flash("有提取任务进行中，请稍候…", true);
-    return;
-  }
-  busy = true;
-  const btn = $("btn-extract");
-  btn.classList.add("loading");
-  $("btn-label").textContent = `提取中：${name}`;
-  flash(`正在提取示例图 ${name}…`);
-
-  const fd = new FormData();
-  fd.append("group", group);
-  fd.append("name", name);
-  fd.append("ocr", $("ocr-select").value);
-  fd.append("segmenter", $("segmenter-select").value);
+/* ================= 示例图（可刷新） ================= */
+async function loadExamples(refresh) {
   try {
-    const resp = await fetch("/api/extract_example", { method: "POST", body: fd });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.detail || `请求失败（HTTP ${resp.status}）`);
-    renderResultCard(data);
-    flash(`提取完成：${data.filename}，${data.elapsed_s}s`, false);
-  } catch (err) {
-    renderResultError(name, err.message);
-    flash(`提取失败：${err.message}`, true);
-  } finally {
-    busy = false;
-    btn.classList.remove("loading");
-    $("btn-label").textContent = `③ 批量提取（${fileList.length} 张）`;
-    $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-}
-
-async function loadExamples() {
-  try {
-    const resp = await fetch("/api/examples");
+    const resp = await fetch("/api/examples" + (refresh ? "?refresh=1" : ""));
     const data = await resp.json();
     const box = $("examples");
     box.innerHTML = "";
@@ -261,29 +290,43 @@ async function loadExamples() {
     $("examples").innerHTML = `<p class="hint">示例图加载失败：${e.message}</p>`;
   }
 }
-loadExamples();
+$("btn-refresh-examples").addEventListener("click", () => loadExamples(true));
+loadExamples(false);
 
-/* ================= 工作台切页 ================= */
-(function initTabs() {
-  const tabs = document.getElementById("main-tabs");
-  if (!tabs) return;
-  const extract = document.getElementById("view-extract");
-  const synth = document.getElementById("view-synth");
-  tabs.addEventListener("click", (e) => {
-    const btn = e.target.closest(".tab");
-    if (!btn) return;
-    const view = btn.dataset.view;
-    tabs.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === btn));
-    if (extract) extract.classList.toggle("hidden", view !== "extract");
-    if (synth) synth.classList.toggle("hidden", view !== "synth");
-    if (view === "synth") location.hash = "synth";
-    else history.replaceState(null, "", location.pathname);
-  });
-  if (location.hash === "#synth") {
-    const btn = tabs.querySelector('.tab[data-view="synth"]');
-    if (btn) btn.click();
+async function extractExample(group, name) {
+  if (busy) {
+    flash("有提取任务进行中，请稍候…", true);
+    return;
   }
-})();
+  busy = true;
+  const btn = $("btn-extract");
+  btn.classList.add("loading");
+  $("btn-label").textContent = `提取中：${name}`;
+  flash(`正在提取示例图 ${name}…`);
+  const params = currentParams();
+
+  const fd = new FormData();
+  fd.append("group", group);
+  fd.append("name", name);
+  fd.append("ocr", params.ocr);
+  fd.append("segmenter", params.segmenter);
+  fd.append("points", params.points);
+  try {
+    const resp = await fetch("/api/extract_example", { method: "POST", body: fd });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(errorMessage(data.detail, resp.status));
+    renderResultCard(data);
+    flash(`提取完成：${data.filename}，${data.elapsed_s}s`, false);
+  } catch (err) {
+    renderResultError(name, err.message);
+    flash(`提取失败：${err.message}`, true);
+  } finally {
+    busy = false;
+    btn.classList.remove("loading");
+    $("btn-label").textContent = `批量提取（${fileList.length} 张）`;
+    $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
 
 /* ================= Lightbox 放大查看 ================= */
 window.openLightbox = function (url) {

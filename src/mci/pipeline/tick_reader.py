@@ -39,20 +39,30 @@ class PaddleOCRBackend:
     ``strip_crops = True`` tells the tick reader to OCR only the two axis
     label strips (bottom + left) instead of the whole chart — the labels are
     small, so this is 10-50x faster than full-image OCR.
+
+    ``tier`` selects the model generation:
+      * "server" (default): PP-OCRv5 server det+rec — large gains on small
+        print and handwriting (official: en printed det Hmean 0.690 -> 0.917,
+        en handwritten rec 0.249 -> 0.841 vs v4 mobile);
+      * "mobile": legacy PP-OCRv4 mobile pair (kept as fallback / for the
+        M4 latency budget on CPU-only machines).
+    The v5 init falls back to v4 automatically when the v5 models cannot be
+    downloaded / loaded (offline machines, older paddleocr wheels).
     """
 
     strip_crops = True
     _init_lock = threading.Lock()
-    _shared: Dict[Tuple[str, str], "object"] = {}  # (lang, device) -> engine
+    _shared: Dict[Tuple[str, str], "object"] = {}  # (lang, device+tier) -> engine
 
-    def __init__(self, lang: str = "en", device: str = "auto"):
+    def __init__(self, lang: str = "en", device: str = "auto", tier: str = "server"):
         self.lang = lang
         self.device = device
+        self.tier = "mobile" if str(tier).lower() == "mobile" else "server"
         self._ocr = None
 
     def _ensure(self):
         if self._ocr is None:
-            key = (self.lang, self.device)
+            key = (self.lang, self.device + ":" + self.tier)
             with PaddleOCRBackend._init_lock:  # 防多线程并发双初始化（Web 场景）
                 cached = PaddleOCRBackend._shared.get(key)
                 if cached is not None:
@@ -76,15 +86,36 @@ class PaddleOCRBackend:
                         use_textline_orientation=False,
                         lang=self.lang,
                         enable_mkldnn=False,  # avoids oneDNN PIR conversion crashes
-                        text_detection_model_name="PP-OCRv4_mobile_det",
-                        text_recognition_model_name="PP-OCRv4_mobile_rec",
                     )
                     use_gpu = (
                         self.device == "gpu"
                         or (self.device == "auto" and paddle.device.is_compiled_with_cuda())
                     )
-                    self._ocr = PaddleOCR(device="gpu" if use_gpu else "cpu", **kwargs)
-                    self._device_used = "gpu" if use_gpu else "cpu"
+                    device = "gpu" if use_gpu else "cpu"
+                    tried: list = []
+                    if self.tier == "server":
+                        tried.append(("PP-OCRv5_server_det", "PP-OCRv5_server_rec"))
+                    tried.append(("PP-OCRv4_mobile_det", "PP-OCRv4_mobile_rec"))
+                    last_err: Exception | None = None
+                    for det_name, rec_name in tried:
+                        try:
+                            self._ocr = PaddleOCR(
+                                device=device,
+                                text_detection_model_name=det_name,
+                                text_recognition_model_name=rec_name,
+                                **kwargs,
+                            )
+                            self._models = (det_name, rec_name)
+                            print(f"[ocr] using {det_name} / {rec_name} ({device})")
+                            break
+                        except Exception as e:  # model download/load failure
+                            last_err = e
+                            print(f"[ocr] {det_name} unavailable "
+                                  f"({type(e).__name__}); falling back")
+                    else:
+                        raise TickReadingError(
+                            f"no OCR model pair could be loaded: {last_err}")
+                    self._device_used = device
                     PaddleOCRBackend._shared[key] = self._ocr
                 except ImportError as e:  # pragma: no cover
                     raise TickReadingError(
@@ -359,6 +390,101 @@ def _is_tick_label(b: TextBox, min_score: float) -> bool:
         return False
     return True
 
+
+# ---------------------------------------------------------------------------
+# Superscript / subscript fragment re-assembly (per-tick baseline clustering)
+# ---------------------------------------------------------------------------
+def _fragment_text(t: str) -> bool:
+    """True when ``t`` looks like an exponent/sign fragment ('-3', '10')."""
+    s = t.strip().replace("⁻", "-").replace("−", "-")
+    return bool(s) and len(s) <= 3 and all(
+        c.isdigit() or c in "+-." for c in s)
+
+
+def _merge_superscripts(boxes: List[TextBox]) -> List[TextBox]:
+    """Re-attach superscript fragments to their base label.
+
+    PP-OCR's line grouping splits raised exponents ('10⁻³' -> base '10' +
+    fragment '-3' / '3' at a higher baseline), which then either parse as a
+    WRONG value ('10') or pollute the tick sequence.  Community fix (and
+    goal.md 任务1.4 T2c): cluster boxes that horizontally overlap / nearly
+    touch, treat vertically-raised short digit fragments as exponents and
+    re-merge them as '10^-3' (parse_number_text handles that syntax).
+
+    Guards against false merges (a real regression case: a log y-axis
+    renders stacked right-aligned labels '10'/'100'/'1000' in one column —
+    they overlap horizontally, so distance alone cannot be the test):
+      * fragment is 1-3 chars of digits/signs, no taller than the base;
+      * fragment starts to the RIGHT of the base (an exponent FOLLOWS its
+        base; stacked y-labels share the same left edge -> excluded);
+      * fragment is RAISED by 0.35..1.2 base heights (same-baseline
+        neighbours and labels a full row apart are both excluded);
+      * the base starts with '10' / contains x10, or the base alone fails
+        to parse;
+      * the merged text must parse as a number, else boxes are kept as-is.
+    Subscript merging is intentionally NOT done: '_'-joined text is not a
+    recognised numeric syntax and tick subscripts are practically
+    nonexistent, so raising anything below the baseline is never merged.
+    """
+    if len(boxes) < 2:
+        return boxes
+    used = [False] * len(boxes)
+    out: List[TextBox] = []
+
+    def _hgap(a: TextBox, b: TextBox) -> float:
+        a_x0, a_x1 = a.box[:, 0].min(), a.box[:, 0].max()
+        b_x0, b_x1 = b.box[:, 0].min(), b.box[:, 0].max()
+        return max(0.0, max(a_x0, b_x0) - min(a_x1, b_x1))
+
+    for i, base in enumerate(boxes):
+        if used[i]:
+            continue
+        bh = float(base.box[:, 1].max() - base.box[:, 1].min())
+        bcy = float(base.box[:, 1].min() + base.box[:, 1].max()) / 2.0
+        bx0 = float(base.box[:, 0].min())
+        bx1 = float(base.box[:, 0].max())
+        bt = base.text.strip()
+        base_is_10fam = bt.startswith("10") or ("x10" in bt) or ("×10" in bt)
+        base_parses = parse_number_text(bt) is not None
+        merged_text = bt
+        top = base.box.copy()
+        min_score = base.score
+        changed = False
+        for j in range(i + 1, len(boxes)):
+            if used[j]:
+                continue
+            frag = boxes[j]
+            if not _fragment_text(frag.text):
+                continue
+            fh = float(frag.box[:, 1].max() - frag.box[:, 1].min())
+            if fh > bh:  # fragment taller than the base: not a superscript
+                continue
+            fx0 = float(frag.box[:, 0].min())
+            if fx0 < bx1 - 0.2 * bh:
+                continue  # fragment does not FOLLOW the base -> another label
+            if _hgap(base, frag) > 0.4 * bh:
+                continue  # too far right to be attached to this label
+            fcy = float(frag.box[:, 1].min() + frag.box[:, 1].max()) / 2.0
+            raised = bcy - fcy
+            if not (0.35 * bh < raised <= 1.2 * bh):
+                continue  # same baseline, below, or a full label-row away
+            if not (base_is_10fam or not base_parses):
+                continue
+            exp = frag.text.strip().replace("⁻", "-").replace("−", "-")
+            candidate = merged_text + "^" + exp
+            if parse_number_text(candidate) is None:
+                continue
+            merged_text = candidate
+            top = np.concatenate([top, frag.box], axis=0)
+            min_score = min(min_score, frag.score)
+            used[j] = True
+            changed = True
+        if changed:
+            out.append(TextBox(box=top, text=merged_text, score=min_score))
+        else:
+            out.append(base)
+    return out
+
 def read_ticks(
     image_bgr: np.ndarray,
     structure: ChartStructure,
@@ -391,6 +517,10 @@ def read_ticks(
     strict_y = len(structure.y_ticks_px) >= 4
     for attempt in (0, 1, 2):
         x_labels, y_labels = _classify_labels(boxes, structure)
+        # T2c: re-attach superscript fragments ('10'+'-3' -> '10^-3') BEFORE
+        # association, so a raised exponent is never read as a stray label.
+        x_labels = _merge_superscripts(x_labels)
+        y_labels = _merge_superscripts(y_labels)
         x_ticks = _associate(structure.x_ticks_px, x_labels, "x", tol, strict_x)
         y_ticks = _associate(structure.y_ticks_px, y_labels, "y", tol, strict_y)
         nv_x = sum(1 for t in x_ticks if t.value is not None)
